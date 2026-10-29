@@ -7,7 +7,9 @@ name = "spade-speculative-decoding"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "Reproducible M1-M3 baseline and rejection instrumentation for SPADE"
-dependencies = ["torch==2.6.0"]
+# Keep installation lightweight. PyTorch/CUDA builds are server-specific and
+# must be supplied by the active environment, not replaced by pip implicitly.
+dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]

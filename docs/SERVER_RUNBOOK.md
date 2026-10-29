@@ -18,12 +18,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m pip install -e .
+python -m pip install -e . --no-deps
 python scripts/inspect_environment.py
 nvidia-smi
 ```
 
-Validate CUDA and BF16 from `inspect_environment.py`. Pinned PyTorch wheel must match the server CUDA driver; replace the package index selection only after matching the official PyTorch install matrix.
+PyTorch is deliberately excluded from `requirements.txt` so pip will not replace the server's CUDA-specific build with a large generic wheel. Check the installed PyTorch, CUDA, and BF16 values with `inspect_environment.py`; install PyTorch separately only if it is absent, using the official wheel matching the server Python/CUDA setup.
 
 ## C. Dataset download and inspection
 
