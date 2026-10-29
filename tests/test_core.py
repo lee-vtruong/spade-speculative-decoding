@@ -2,6 +2,7 @@ import json
 import pytest
 torch=pytest.importorskip("torch")
 from spade.benchmark.benchmark_builder import build_examples, stratified_sample
+from spade.benchmark.averitec_loader import claim_id
 from spade.benchmark.evaluation import parse_generation
 from spade.benchmark.prompt_builder import build_prompt
 from spade.decoding.sampling import acceptance_probability, expected_acceptance, residual_distribution, total_variation
@@ -47,3 +48,9 @@ def test_parse_verdict_strict_and_citations():
 def test_stratified_sample_deterministic():
     rows=[{"label":"a","id":i} for i in range(8)]+[{"label":"b","id":i+8} for i in range(2)]
     assert stratified_sample(rows,5,7)==stratified_sample(rows,5,7)
+
+def test_official_averitec_shape_gets_stable_non_gold_id():
+    row={"claim":"A claim without an explicit ID", "claim_date":"2020", "speaker":"source", "label":"Refuted", "justification":"private"}
+    other={**row,"label":"Supported","justification":"different gold text"}
+    assert claim_id(row).startswith("avc-")
+    assert claim_id(row)==claim_id(other)

@@ -1,6 +1,7 @@
 """Adapters for official AVeriTeC JSON exports (schema-tolerant, no downloads)."""
 from __future__ import annotations
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -24,7 +25,14 @@ def load_records(path: str | Path) -> list[dict[str, Any]]:
 def claim_id(row: dict[str, Any]) -> str:
     for key in ("claim_id", "id", "claimId"):
         if row.get(key) is not None: return str(row[key])
-    raise ValueError("Record is missing a claim identifier (claim_id/id)")
+    # Official exports may omit an explicit ID. Derive a stable identifier only
+    # from claim-visible metadata; never include label or justification.
+    claim = row.get("claim")
+    if isinstance(claim, dict): claim = claim.get("claim") or claim.get("text")
+    if isinstance(claim, str) and claim.strip():
+        identity = "\0".join(str(row.get(k, "")) for k in ("original_claim_url", "claim_date", "speaker")) + "\0" + claim.strip()
+        return "avc-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    raise ValueError("Record is missing an identifier and has no usable claim text")
 
 def claim_text(row: dict[str, Any]) -> str:
     value = row.get("claim")
