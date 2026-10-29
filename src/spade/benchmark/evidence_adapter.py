@@ -12,9 +12,16 @@ def oracle_evidence(row: dict[str, Any]) -> list[dict[str, Any]]:
     for item in qa:
         if not isinstance(item, dict): continue
         question = item.get("question", "")
-        answer = item.get("answer", "")
-        text = " ".join(x.strip() for x in (question, answer) if isinstance(x, str) and x.strip())
-        if text: out.append(_passage(text, len(out)+1, provenance="oracle_qa"))
+        answers = item.get("answers", item.get("answer", []))
+        if isinstance(answers, (str, dict)): answers = [answers]
+        for answer_item in answers if isinstance(answers, list) else []:
+            if isinstance(answer_item, dict):
+                answer = answer_item.get("answer", "")
+                source = answer_item.get("source_url") or answer_item.get("url") or ""
+            else:
+                answer, source = answer_item, ""
+            text = " ".join(x.strip() for x in (question, answer) if isinstance(x, str) and x.strip())
+            if text: out.append(_passage(text, len(out)+1, str(source), provenance="oracle_qa"))
     return out
 
 def retrieved_evidence(row: dict[str, Any], retrieved: list[dict[str, Any]] | None, top_k: int = 8) -> list[dict[str, Any]]:

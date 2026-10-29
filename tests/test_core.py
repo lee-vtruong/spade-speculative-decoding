@@ -54,3 +54,8 @@ def test_official_averitec_shape_gets_stable_non_gold_id():
     other={**row,"label":"Supported","justification":"different gold text"}
     assert claim_id(row).startswith("avc-")
     assert claim_id(row)==claim_id(other)
+
+def test_oracle_adapter_supports_nested_averitec_answers():
+    ex=build_examples([{**sample_row(),"questions":[{"question":"Q?","answers":[{"answer":"A.","source_url":"https://example.test"}]}]}],"oracle_qa")[0]
+    assert ex["evidence"][0]["text"]=="Q? A."
+    assert ex["evidence"][0]["source_url"]=="https://example.test"
