@@ -1,0 +1,9 @@
+target_model: Qwen/Qwen3-8B
+draft_model: Qwen/Qwen3-0.6B
+precision: bfloat16
+max_new_tokens: 256
+draft_lengths: [2, 4, 6, 8]
+temperature: 1.0
+top_k: 0
+top_p: 1.0
+local_files_only: true

@@ -1,0 +1,7 @@
+dataset: averitec
+split: dev
+evidence_mode: retrieved
+evidence_top_k: 8
+subset_size: 3
+sampling_seed: 42
+prompt_version: spade_factcheck_v1

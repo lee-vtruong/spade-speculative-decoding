@@ -1,0 +1,28 @@
+# Server-only datasets, checkpoints, and run artifacts
+data/
+models/
+outputs/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+# Python and local environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.env
+.env.*
+!.env.example
+# Hugging Face cache and profiling artifacts
+huggingface/
+**/.cache/huggingface/
+*.prof
+*.nsys-rep
+*.qdrep
+*.log
+*.tmp

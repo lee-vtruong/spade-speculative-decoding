@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spade-speculative-decoding"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Reproducible M1-M3 baseline and rejection instrumentation for SPADE"
+dependencies = ["torch==2.6.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

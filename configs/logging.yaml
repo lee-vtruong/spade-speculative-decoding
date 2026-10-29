@@ -1,0 +1,3 @@
+trace_schema_version: 1
+round_traces: round_traces.jsonl
+token_traces: token_traces.jsonl
