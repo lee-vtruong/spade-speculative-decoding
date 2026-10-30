@@ -116,6 +116,12 @@ def test_claim_only_store_excludes_gold_qa_and_other_query_types():
         assert [x["text"] for x in mapped[claim_id(row)]]==["claim retrieved text"]
         assert audit["query_types_seen"]["question"]==1 and audit["query_type_allowlist"]==["claim"]
 
+def test_claim_only_store_reports_invalid_dataset_row():
+    import pytest
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+        with pytest.raises(ValueError, match=r"row 0 .*keys=\['id', 'label'\]"):
+            load_claim_only_knowledge_store([{"id":"x","label":"True"}],temp)
+
 def test_manifest_tracks_ids_hashes_and_token_lengths():
     rows=[sample_row()]; examples=build_examples(rows,"oracle_qa")
     manifest=build_manifest(dataset_path="data.json",dataset_hash="abc",split="dev",seed=3,mode="oracle_qa",top_k=8,examples=examples,token_lengths=[37])
