@@ -3,11 +3,12 @@ import tempfile
 from pathlib import Path
 import pytest
 torch=pytest.importorskip("torch")
-from spade.benchmark.benchmark_builder import build_examples, stratified_sample
+from spade.benchmark.benchmark_builder import build_examples, build_manifest, stratified_sample
 from spade.benchmark.averitec_loader import claim_id
+from spade.benchmark.evidence_adapter import load_claim_only_knowledge_store
 from spade.benchmark.evaluation import parse_generation
 from spade.benchmark.prompt_builder import build_prompt
-from spade.decoding.sampling import acceptance_probability, expected_acceptance, residual_distribution, sample_distribution, total_variation
+from spade.decoding.sampling import acceptance_probability, expected_acceptance, processed_distribution, residual_distribution, sample_distribution, total_variation
 from spade.decoding.speculative import exact_speculative_round
 from spade.decoding.hf_assisted import QwenPair
 from spade.instrumentation.trace_schema import ROUND_FIELDS, TOKEN_FIELDS, validate_record
@@ -32,6 +33,11 @@ def test_sampling_identities_and_residual():
     assert expected_acceptance(p,q)==pytest.approx(1-total_variation(p,q))
     assert acceptance_probability(p,q,0).item()==1
     r=residual_distribution(p,q); assert r.tolist()==pytest.approx([1,0])
+
+def test_top_p_keeps_minimal_prefix_that_reaches_threshold():
+    probs=torch.tensor([.5,.25,.25],dtype=torch.float64)
+    out=processed_distribution(torch.log(probs),top_p=.5)
+    assert out.tolist()==pytest.approx([1.,0.,0.])
 
 @pytest.mark.parametrize("p_values,q_values",[
     ([.5,.5],[.5,.5]),
@@ -63,6 +69,23 @@ def test_full_acceptance_and_rejection_rounds():
     rejected=exact_speculative_round([1],[q0],[p0],generator=g)
     assert rejected.committed==[0] and rejected.statuses==["rejected"]
 
+@pytest.mark.parametrize("reject_at",[0,1,2])
+def test_exact_round_first_middle_and_last_rejection(reject_at):
+    q=torch.tensor([1.,0.],dtype=torch.float64); accepted_p=torch.tensor([1.,0.],dtype=torch.float64); rejected_p=torch.tensor([0.,1.],dtype=torch.float64)
+    ps=[accepted_p]*reject_at+[rejected_p]+[accepted_p]*(2-reject_at)
+    result=exact_speculative_round([0,0,0],[q]*3,ps,generator=torch.Generator().manual_seed(17))
+    assert result.rejected_position==reject_at
+    assert result.committed==[0]*reject_at+[1]
+    assert result.statuses==["accepted"]*reject_at+["rejected"]+["discarded_after_rejection"]*(2-reject_at)
+
+def test_exact_round_eos_and_partial_final_block_do_not_add_extra():
+    p=torch.tensor([.5,.5],dtype=torch.float64); g=torch.Generator().manual_seed(6)
+    eos=exact_speculative_round([0,1,0],[p,p,p],[p,p,p],generator=g,eos_token_id=1,target_extra=p)
+    assert eos.committed==[0,1] and eos.extra_target is None
+    one=torch.tensor([1.,0.],dtype=torch.float64)
+    partial=exact_speculative_round([0],[one],[one],generator=g,remaining=1,target_extra=one)
+    assert partial.committed==[0] and partial.extra_target is None
+
 def test_parse_verdict_strict_and_citations():
     r=parse_generation(json.dumps({"summary":"x","citations":["E1"],"verdict":"Refuted"}),{"E1"})
     assert r["parse_success"] and r["citation_ids_valid"]
@@ -77,6 +100,28 @@ def test_official_averitec_shape_gets_stable_non_gold_id():
     other={**row,"label":"Supported","justification":"different gold text"}
     assert claim_id(row).startswith("avc-")
     assert claim_id(row)==claim_id(other)
+
+def test_claim_only_store_excludes_gold_qa_and_other_query_types():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+        row={"claim":"A claim", "label":"Supported", "justification":"secret"}
+        store=Path(temp)/"store"; store.mkdir()
+        entries=[
+            {"claim_id":"0","type":"gold","query":"_","url":"g","url2text":["gold text"]},
+            {"claim_id":"0","type":"question","query":"Where?","url":"q","url2text":["qa text"]},
+            {"claim_id":"0","type":"claim","query":"A claim","url":"safe","url2text":["claim retrieved text"]},
+            {"claim_id":"0","type":"gpt_question","query":"Who?","url":"gpt","url2text":["generated text"]},
+        ]
+        (store/"0.json").write_text("\n".join(json.dumps(x) for x in entries),encoding="utf-8")
+        mapped,audit=load_claim_only_knowledge_store([row],store,top_k=8)
+        assert [x["text"] for x in mapped[claim_id(row)]]==["claim retrieved text"]
+        assert audit["query_types_seen"]["question"]==1 and audit["query_type_allowlist"]==["claim"]
+
+def test_manifest_tracks_ids_hashes_and_token_lengths():
+    rows=[sample_row()]; examples=build_examples(rows,"oracle_qa")
+    manifest=build_manifest(dataset_path="data.json",dataset_hash="abc",split="dev",seed=3,mode="oracle_qa",top_k=8,examples=examples,token_lengths=[37])
+    assert manifest["selected_claim_ids"]==[claim_id(rows[0])]
+    assert manifest["statistics"]["input_token_count"]["mean"]==37
+    assert manifest["prompt_hashes"][claim_id(rows[0])]==examples[0]["prompt_hash"]
 
 def test_oracle_adapter_supports_nested_averitec_answers():
     ex=build_examples([{**sample_row(),"questions":[{"question":"Q?","answers":[{"answer":"A.","source_url":"https://example.test"}]}]}],"oracle_qa")[0]

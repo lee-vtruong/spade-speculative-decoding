@@ -1,89 +1,101 @@
-# Linux GPU server runbook
+# M1–M3 server runbook (hvtham-server)
 
-**Readiness:** benchmark preparation and CPU sampling primitives are available. A diagnostic B0–B2 Hugging Face adapter now uses full-prefix recomputation without KV cache. It is intended only for short correctness/integration smoke runs; timing is explicitly non-authoritative. Optimized cache handling, full M3 trace export, and real GPU validation remain pending.
+Run all commands from the SPADE repository. Inputs in `ERRORFlow` and `training-free-fact-verification` are read-only. Every generated artifact goes under this repository's `outputs/` directory. Do not extract, rename, or rewrite files in the shared projects.
 
-## A. Repository synchronization
+## 0. Environment
 
 ```bash
-git clone <REPOSITORY_URL>
-cd spade-speculative-decoding
+cd ~/whale/spade-speculative-decoding
 git pull
-git rev-parse HEAD | tee experiment-commit.txt
-```
-
-## B. Python environment
-
-```bash
-python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -e . --no-deps
+export DATA="$HOME/whale/ERRORFlow/data/raw/averitec"
+export STORE="$HOME/whale/training-free-fact-verification/data_store/knowledge_store/train/uncompressed"
+export TARGET="$HOME/whale/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
+export DRAFT="$HOME/whale/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
 python scripts/inspect_environment.py
-nvidia-smi
+python -c 'import torch; print(torch.__version__, torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no GPU")'
 ```
 
-PyTorch is deliberately excluded from `requirements.txt` so pip will not replace the server's CUDA-specific build with a large generic wheel. Check the installed PyTorch, CUDA, and BF16 values with `inspect_environment.py`; install PyTorch separately only if it is absent, using the official wheel matching the server Python/CUDA setup.
+## M1 — Build benchmark and inspect evidence coverage
 
-## C. Dataset download and inspection
-
-Set `DATA_ROOT` to a server-owned location. Obtain official AVeriTeC files from the project release/repository or the Hugging Face dataset repository using its documented download process; this repository deliberately does not download data. Place split JSON in `$DATA_ROOT/raw/`, retrieved passages in a JSON mapping from claim ID to ranked passage arrays, and inspect:
+First audit the existing train store without modifying it. The adapter accepts only exact `type=claim` query matches to the claim text; QA, gold, answer, GPT, provenance, and other rows are excluded to avoid label/evidence leakage.
 
 ```bash
-python scripts/inspect_dataset.py "$DATA_ROOT/raw/averitec_dev.json"
+python scripts/inspect_knowledge_store.py "$DATA/train.json" "$STORE" --top-k 8
 ```
 
-Retrieved JSON example shape: `{"claim-id": [{"text":"...", "url":"...", "rank":1, "score":12.3}]}`. Rankings must be generated without gold labels, justifications, or QA. Oracle QA is a diagnostic fallback only.
-
-## D. Model checkpoints
-
-Download `Qwen/Qwen3-8B` and `Qwen/Qwen3-0.6B` to `MODEL_ROOT/Qwen3-8B` and `MODEL_ROOT/Qwen3-0.6B` using Hugging Face Hub tooling on the server. Pin a Hub revision/commit for both and record it with the experiment. `local_files_only` defaults true in the model helper; no official run should silently fetch missing weights.
-
-## E. M1 benchmark preparation
+Create a full oracle QA benchmark for diagnostic comparison and a retrieved benchmark from the safe exact-claim subset. Outputs are immutable; use a new name if rerunning.
 
 ```bash
-export DATA_ROOT=/srv/spade/data
-python scripts/inspect_dataset.py "$DATA_ROOT/raw/averitec_dev.json"
-python scripts/prepare_benchmark.py "$DATA_ROOT/raw/averitec_dev.json" "$DATA_ROOT/processed/smoke.jsonl" --mode oracle_qa --size 3 --seed 42
+mkdir -p outputs/benchmarks
+python scripts/prepare_benchmark.py "$DATA/train.json" outputs/benchmarks/train-oracle.jsonl --split train --mode oracle_qa --size full --seed 42 --tokenizer "$TARGET"
+python scripts/prepare_benchmark.py "$DATA/train.json" outputs/benchmarks/train-retrieved-claim-only.jsonl --split train --mode retrieved --knowledge-store-dir "$STORE" --size full --top-k 8 --seed 42 --tokenizer "$TARGET"
 ```
 
-Retrieved mode requires `--retrieved "$DATA_ROOT/processed/retrieved_dev.json" --top-k 8`. `--size 100` and `--size 200` select pilot sizes. The prepared JSONL preserves evaluation metadata separately from the prompt field. Leakage tests: `python -m pytest tests/test_core.py -k gold`.
-
-## F. M2 baseline execution
-
-Example diagnostic run (not a performance benchmark):
+Use `--size 3` for a smoke run, `100` or `200` for a pilot. If the claim-only audit reports poor coverage, do not silently include other query types. Oracle QA is a separate diagnostic condition and is not retrieval evidence. Dev has no store in the shared workspace; use oracle QA for dev, or download the official dev archive only into a new SPADE-owned directory (never into the shared project):
 
 ```bash
-python scripts/run_baselines.py --mode B1 --input benchmark.jsonl --target /path/to/Qwen3-8B --draft /path/to/Qwen3-0.6B --max-new-tokens 16 --draft-length 2 --limit 3 --output-root outputs/runs
+mkdir -p data/external/averitec-dev-knowledge-store
+curl -L 'https://huggingface.co/chenxwh/AVeriTeC/resolve/74b0b0fa7357e5bbddf83e087a9feed082d8d8f4/data_store/knowledge_store/dev_knowledge_store.zip' -o data/external/averitec-dev-knowledge-store/dev_knowledge_store.zip
+unzip -q data/external/averitec-dev-knowledge-store/dev_knowledge_store.zip -d data/external/averitec-dev-knowledge-store/unpacked
 ```
 
-The adapter writes an immutable run directory with raw/parsed generations, `round_traces.jsonl`, and `token_traces.jsonl` and reports `timings_authoritative: false`, because it recomputes full prefixes and does not use KV cache. Do not use these timings for official latency/speedup claims. B0–B2 GPU behavior still needs server validation.
+Inspect the archive layout before passing the appropriate per-claim directory to `--knowledge-store-dir`. The external directory is git-ignored.
 
-To check B0/B1 greedy equality, run both on the same prepared JSONL, same target, dtype, token limit, and claim limit, then compare their run directories:
+## M2 — Run decoding baselines
+
+Smoke the target-only baseline first, then compare greedy target-only B0 against speculative B1 under the same prompt, target, dtype, token limit, and claims. `run_baselines.py` defaults to full-prefix recomputation (no KV cache): these runs validate behavior and collect traces, but their latency is not suitable for speedup claims.
 
 ```bash
-python scripts/run_baselines.py --mode B0 --input benchmark.jsonl --target /path/to/Qwen3-8B --dtype bfloat16 --max-new-tokens 64 --limit 3 --run-id b0-smoke --output-root outputs/runs
-python scripts/run_baselines.py --mode B1 --input benchmark.jsonl --target /path/to/Qwen3-8B --draft /path/to/Qwen3-0.6B --dtype bfloat16 --draft-length 4 --max-new-tokens 64 --limit 3 --run-id b1-smoke --output-root outputs/runs
-python scripts/compare_greedy.py outputs/runs/b0-smoke outputs/runs/b1-smoke
+python scripts/run_baselines.py --mode B0 --input outputs/benchmarks/train-oracle.jsonl --target "$TARGET" --dtype bfloat16 --max-new-tokens 64 --limit 3 --warmup 1 --trials 3 --run-id m2-b0-greedy --output-root outputs/runs
+python scripts/run_baselines.py --mode B1 --input outputs/benchmarks/train-oracle.jsonl --target "$TARGET" --draft "$DRAFT" --dtype bfloat16 --draft-length 4 --max-new-tokens 64 --limit 3 --warmup 1 --trials 3 --run-id m2-b1-greedy --output-root outputs/runs
+python scripts/compare_greedy.py outputs/runs/m2-b0-greedy outputs/runs/m2-b1-greedy --output outputs/runs/m2-greedy-comparison.json
 ```
 
-## G. M3 analysis
-
-`scripts/analyze_traces.py` accepts schema-compatible JSONL and writes aggregate JSON:
+After the smoke run passes, execute the complete target-only/greedy sweep with unique run IDs (change the input path to the selected M1 benchmark):
 
 ```bash
-python scripts/analyze_traces.py outputs/run/round_traces.jsonl outputs/run/token_traces.jsonl --output outputs/run/metrics.json
+for K in 2 4 6 8; do
+  python scripts/run_baselines.py --mode B1 --input outputs/benchmarks/train-retrieved-claim-only.jsonl --target "$TARGET" --draft "$DRAFT" --dtype bfloat16 --draft-length "$K" --max-new-tokens 256 --warmup 1 --trials 3 --run-id "m2-b1-k${K}" --output-root outputs/runs
+done
 ```
 
-No model-generated trace producer or plot exporter is available yet. Do not generate benchmark plots from synthetic or absent runs.
+For exact speculative sampling B2, pair it with target sampling B0-S. Fix sampling policy and seed; repeat with several seeds to study statistical behavior. A single B2 run exercising rejection is not a distributional validation.
 
-## H. Troubleshooting
+```bash
+python scripts/run_baselines.py --mode B0-S --input outputs/benchmarks/train-oracle.jsonl --target "$TARGET" --dtype bfloat16 --temperature 0.7 --top-p 0.9 --seed 42 --max-new-tokens 128 --limit 3 --run-id m2-b0s-sampling --output-root outputs/runs
+python scripts/run_baselines.py --mode B2 --input outputs/benchmarks/train-oracle.jsonl --target "$TARGET" --draft "$DRAFT" --dtype bfloat16 --draft-length 4 --temperature 0.7 --top-p 0.9 --seed 42 --max-new-tokens 128 --limit 3 --run-id m2-b2-exact-sampling --output-root outputs/runs
+```
 
-- CUDA OOM: not yet addressed by benchmark orchestration; do not silently quantize/offload/change model. Record GPU memory and stop.
-- BF16 unsupported: stop official run; do not silently substitute precision.
-- Tokenizer mismatch: model helper fails closed on vocab IDs/special tokens; inspect revisions.
-- Dataset fields: inspect actual keys first; adapt the loader only with fixtures.
-- Malformed JSON: evaluation stores parse failure; no repair generation is implemented.
-- KV cache mismatch / output differences: inference is pending; no cache fallback is claimed.
-- Poor acceptance / negative speedup: expected research outcomes; measure only after adapter validation.
-- Interrupted execution: immutable run IDs/resume are not implemented yet; preserve run files and avoid rerunning into the same output directory.
+For the full B2 draft-length sweep, use independent run IDs and repeat with multiple seeds:
+
+```bash
+for SEED in 42 123 2026; do
+  for K in 2 4 6 8; do
+    python scripts/run_baselines.py --mode B2 --input outputs/benchmarks/train-retrieved-claim-only.jsonl --target "$TARGET" --draft "$DRAFT" --dtype bfloat16 --draft-length "$K" --temperature 0.7 --top-p 0.9 --seed "$SEED" --max-new-tokens 256 --run-id "m2-b2-s${SEED}-k${K}" --output-root outputs/runs
+  done
+done
+```
+
+Each run directory contains resolved config, environment/GPU metadata, predictions, timing trial rows, and round/token traces. B0-S/B2 token-by-token equality is not expected; test distributional agreement over a sufficiently large fixed prompt set and independent seeds. Factuality requires a separate evaluation protocol.
+
+## M3 — Analyze real traces and evaluate predictions
+
+Pass only actual run directories. This writes JSON summaries, CSV tables, and available PNG figures under the chosen SPADE output path.
+
+```bash
+python scripts/analyze_traces.py outputs/runs/m2-b1-greedy outputs/runs/m2-b2-exact-sampling --output-dir outputs/analysis/m2-m3
+python scripts/evaluate_outputs.py outputs/runs/m2-b1-greedy/predictions.jsonl --output-dir outputs/evaluation/m2-b1-greedy
+python scripts/evaluate_outputs.py outputs/runs/m2-b2-exact-sampling/predictions.jsonl --output-dir outputs/evaluation/m2-b2-exact-sampling
+```
+
+M3 reports acceptance/rejection, proposal probability diagnostics, latency decomposition, context length, and example token traces. Any speedup derived from this recompute adapter is explicitly diagnostic, not authoritative.
+
+## Completion checks
+
+```bash
+python -m pytest -q
+python -c 'import json,pathlib; p=pathlib.Path("outputs/benchmarks/train-oracle.jsonl.manifest.json"); print(json.dumps(json.loads(p.read_text()),indent=2))'
+```
+
+Archive the commit hash, manifests, resolved configs, environment files, metrics, and run IDs with experiment notes. Never place model outputs or benchmark artifacts in either shared dataset project.

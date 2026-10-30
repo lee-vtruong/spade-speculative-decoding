@@ -11,6 +11,7 @@ def processed_distribution(logits: torch.Tensor, temperature: float = 1.0, top_k
         k=min(top_k, x.numel()); threshold=torch.topk(x,k).values[-1]; x=x.masked_fill(x < threshold, -torch.inf)
     if top_p < 1:
         sorted_logits, indices=torch.sort(x, descending=True); probs=torch.softmax(sorted_logits,dim=-1)
+        # Retain the smallest descending prefix whose cumulative mass reaches p.
         remove=torch.cumsum(probs,dim=-1)-probs >= top_p
         remove[0]=False
         x=x.clone(); x[indices[remove]]=-torch.inf

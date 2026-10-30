@@ -13,9 +13,13 @@ def parse_generation(raw: str, evidence_ids: set[str]) -> dict[str, Any]:
         verdict=obj.get("verdict")
         if verdict not in LABEL_MAP: raise ValueError(f"Unknown verdict: {verdict!r}")
         citations=[str(x) for x in obj["citations"]]
-        return {"parsed":obj,"parse_success":True,"parse_error":None,"mapped_label":LABEL_MAP[verdict],"citation_ids_valid":all(x in evidence_ids for x in citations),"summary_chars":len(obj["summary"])}
+        invalid=sorted(set(citations)-evidence_ids)
+        return {"parsed":obj,"parse_success":True,"parse_error":None,"mapped_label":LABEL_MAP[verdict],
+                "citation_ids_valid":not invalid,"citation_id_validity":not invalid,"citation_id_valid_count":len(citations)-len(invalid),
+                "citation_count":len(citations),"invalid_citation_ids":invalid,"summary_chars":len(obj["summary"])}
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        return {"parsed":None,"parse_success":False,"parse_error":str(exc),"mapped_label":None,"citation_ids_valid":False,"summary_chars":None}
+        return {"parsed":None,"parse_success":False,"parse_error":str(exc),"mapped_label":None,"citation_ids_valid":False,
+                "citation_id_validity":False,"citation_id_valid_count":0,"citation_count":0,"invalid_citation_ids":[],"summary_chars":None}
 
 def classification_metrics(gold: list[str], pred: list[str]) -> dict[str, Any]:
     labels=sorted(set(gold)|set(pred)); per={}; tp_total=0

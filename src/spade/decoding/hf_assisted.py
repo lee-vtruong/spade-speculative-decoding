@@ -44,7 +44,7 @@ class QwenPair:
     def _logits(model, ids: list[int], device: torch.device) -> torch.Tensor:
         input_ids=torch.tensor([ids],dtype=torch.long,device=device)
         with torch.inference_mode():
-            return model(input_ids=input_ids,use_cache=False).logits[0,-1].float()
+            return model(input_ids=input_ids,use_cache=False).logits[0,-1].float().to(device)
 
     @staticmethod
     def _sync(device: torch.device) -> None:
@@ -61,15 +61,20 @@ class QwenPair:
         serialized=format_qwen_prompt(self.target_tokenizer,prompt)
         prompt_ids=self.target_tokenizer(serialized,return_tensors="pt",add_special_tokens=False)["input_ids"][0].tolist()
         target_device=self._input_device(self.target); target_eos=self.target_tokenizer.eos_token_id
+        if self.draft is not None and self._input_device(self.draft)!=target_device:
+            raise RuntimeError("Target and draft embeddings are on different devices; current exact-sampling adapter requires a shared inference device")
         generator=torch.Generator(device=target_device).manual_seed(seed)
         generated=[]; round_rows=[]; token_rows=[]
         timings={"prompt_prefill_s":0.0,"draft_generation_s":0.0,"target_verification_s":0.0,"correction_s":0.0,"decode_s":0.0}
+        has_target_prefill=False
         start=time.perf_counter(); round_index=0
         while len(generated)<max_new_tokens:
             prefix=prompt_ids+generated; remaining=max_new_tokens-len(generated); generated_before=len(generated)
             self._sync(target_device); rstart=time.perf_counter(); proposed=[]; q_dists=[]; p_dists=[]
             if mode in {"B0","B0-S"}:
-                t0=time.perf_counter(); logits=self._logits(self.target,prefix,target_device); self._sync(target_device); target_s=time.perf_counter()-t0; timings["target_verification_s"]+=target_s
+                t0=time.perf_counter(); logits=self._logits(self.target,prefix,target_device); self._sync(target_device); target_s=time.perf_counter()-t0
+                if not has_target_prefill: timings["prompt_prefill_s"]+=target_s; has_target_prefill=True
+                else: timings["target_verification_s"]+=target_s
                 if mode=="B0": token=int(torch.argmax(logits).item())
                 else: token=sample_distribution(processed_distribution(logits,temperature,top_k,top_p),generator)
                 generated.append(token)
@@ -92,13 +97,19 @@ class QwenPair:
             # B0's call shape and avoids block-length/backend rounding differences.
             verification_prefix=list(prefix)
             for proposed_token in proposed:
+                verify_start=time.perf_counter()
                 logits=self._logits(self.target,verification_prefix,target_device)
+                self._sync(target_device); verify_s=time.perf_counter()-verify_start
+                if not has_target_prefill: timings["prompt_prefill_s"]+=verify_s; has_target_prefill=True
+                else: timings["target_verification_s"]+=verify_s
                 p_dists.append(processed_distribution(logits,temperature,top_k,top_p))
                 verification_prefix.append(proposed_token)
+            extra_start=time.perf_counter()
             extra_logits=self._logits(self.target,verification_prefix,target_device)
             target_extra=processed_distribution(extra_logits,temperature,top_k,top_p)
-            self._sync(target_device); target_s=time.perf_counter()-t0
-            timings["target_verification_s"]+=target_s
+            self._sync(target_device); extra_s=time.perf_counter()-extra_start
+            timings["target_verification_s"]+=extra_s
+            target_s=time.perf_counter()-t0
             c0=time.perf_counter()
             generation_start=len(generated)
             if mode=="B1":
@@ -124,20 +135,23 @@ class QwenPair:
                 accepted_draft=result.accepted
                 if result.replacement is not None:
                     repl_text=self.target_tokenizer.decode([result.replacement])
-                    token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+result.rejected_position,"token_id":result.replacement,"token_text":repl_text,"draft_probability":None,"target_probability":float(p_dists[result.rejected_position][result.replacement].item()),"acceptance_probability":None,"status":"residual_replacement","reached_by_verifier":True,"discarded_after_rejection":False,"replacement_token_id":result.replacement,"token_category":categorize_token(repl_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(repl_text,evidence_texts or [])})
+                    p_reject=p_dists[result.rejected_position]; q_reject=q_dists[result.rejected_position]
+                    tv=float((0.5*torch.abs(p_reject-q_reject).sum()).item())
+                    token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+result.rejected_position,"token_id":result.replacement,"token_text":repl_text,"draft_probability":None,"target_probability":float(p_reject[result.replacement].item()),"acceptance_probability":None,"total_variation":tv,"expected_acceptance_probability":1.0-tv,"status":"residual_replacement","reached_by_verifier":True,"discarded_after_rejection":False,"replacement_token_id":result.replacement,"token_category":categorize_token(repl_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(repl_text,evidence_texts or [])})
             if mode=="B1" and rejection is not None:
                 replacement=accepted[-1]; repl_text=self.target_tokenizer.decode([replacement])
-                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+rejection,"token_id":replacement,"token_text":repl_text,"draft_probability":None,"target_probability":float(p_dists[rejection][replacement].item()),"acceptance_probability":None,"status":"target_replacement","reached_by_verifier":True,"discarded_after_rejection":False,"replacement_token_id":replacement,"token_category":categorize_token(repl_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(repl_text,evidence_texts or [])})
+                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+rejection,"token_id":replacement,"token_text":repl_text,"draft_probability":None,"target_probability":float(p_dists[rejection][replacement].item()),"acceptance_probability":None,"total_variation":None,"expected_acceptance_probability":None,"status":"target_replacement","reached_by_verifier":True,"discarded_after_rejection":False,"replacement_token_id":replacement,"token_category":categorize_token(repl_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(repl_text,evidence_texts or [])})
             self._sync(target_device); correction_s=time.perf_counter()-c0; timings["correction_s"]+=correction_s
             for i,(token,q,pdist) in enumerate(zip(proposed,q_dists,p_dists)):
                 prob=float(pdist[token].item()); qprob=float(q[token].item()); ap=min(1.0,prob/qprob) if qprob else None
                 st=status[i] if i<len(status) else "discarded_after_rejection"
                 reached=st!="discarded_after_rejection"
                 token_text=self.target_tokenizer.decode([token])
-                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+i,"token_id":token,"token_text":token_text,"draft_probability":qprob,"target_probability":prob,"acceptance_probability":ap if mode=="B2" else None,"status":st,"reached_by_verifier":reached,"discarded_after_rejection":st=="discarded_after_rejection","replacement_token_id":None,"token_category":categorize_token(token_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(token_text,evidence_texts or [])})
+                tv=float((0.5*torch.abs(pdist-q).sum()).item()) if mode=="B2" else None
+                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+i,"token_id":token,"token_text":token_text,"draft_probability":qprob,"target_probability":prob,"acceptance_probability":ap if mode=="B2" else None,"total_variation":tv,"expected_acceptance_probability":1.0-tv if tv is not None else None,"status":st,"reached_by_verifier":reached,"discarded_after_rejection":st=="discarded_after_rejection","replacement_token_id":None,"token_category":categorize_token(token_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(token_text,evidence_texts or [])})
             if extra is not None:
                 extra_text=self.target_tokenizer.decode([extra])
-                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+len(generated)-1,"token_id":extra,"token_text":extra_text,"draft_probability":None,"target_probability":float(target_extra[extra].item()) if mode=="B2" else 1.0,"acceptance_probability":None,"status":"extra_target_token","reached_by_verifier":False,"discarded_after_rejection":False,"replacement_token_id":None,"token_category":categorize_token(extra_text),"prefix_length":len(prompt_ids)+generation_start+len(proposed),"evidence_overlap":evidence_overlap(extra_text,evidence_texts or [])})
+                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+len(generated)-1,"token_id":extra,"token_text":extra_text,"draft_probability":None,"target_probability":float(target_extra[extra].item()) if mode=="B2" else 1.0,"acceptance_probability":None,"total_variation":None,"expected_acceptance_probability":None,"status":"extra_target_token","reached_by_verifier":False,"discarded_after_rejection":False,"replacement_token_id":None,"token_category":categorize_token(extra_text),"prefix_length":len(prompt_ids)+generation_start+len(proposed),"evidence_overlap":evidence_overlap(extra_text,evidence_texts or [])})
             round_rows.append({"run_id":run_id,"claim_id":claim_id,"round_index":round_index,"prefix_length":len(prefix),"draft_length_requested":draft_length,"proposed_token_count":len(proposed),"accepted_draft_tokens":accepted_draft,"rejection_position":rejection,"full_acceptance":rejection is None and accepted_draft==len(proposed),"additional_target_token":extra is not None,"committed_output_tokens":len(generated)-generated_before,"draft_latency_s":draft_s,"verification_latency_s":target_s,"correction_latency_s":correction_s,"total_round_latency_s":time.perf_counter()-rstart,"cumulative_generated_tokens":len(generated)})
             if generated and generated[-1]==target_eos: break
             round_index+=1
