@@ -176,6 +176,17 @@ def test_hf_adapter_tiny_greedy_and_exact_sampling_are_bounded():
     for row in greedy.rounds + exact.rounds: validate_record(row,ROUND_FIELDS)
     for row in greedy.token_traces + exact.token_traces: validate_record(row,TOKEN_FIELDS)
 
+def test_qwen_logits_helper_requests_only_last_position_when_supported():
+    class LastLogitsModel:
+        def __init__(self): self.embedding=torch.nn.Embedding(3,2); self.logits_to_keep=None
+        def get_input_embeddings(self): return self.embedding
+        def __call__(self,input_ids,use_cache=False,logits_to_keep=0):
+            self.logits_to_keep=logits_to_keep
+            return type("Output",(),{"logits":torch.zeros((1,1,3))})()
+    model=LastLogitsModel()
+    result=QwenPair._logits(model,[1,2,1],model.embedding.weight.device)
+    assert model.logits_to_keep==1 and result.shape==(3,)
+
 def test_greedy_run_comparison_checks_claim_prompt_and_tokens():
     with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
         tmp=Path(temp); b0,b1=tmp/"b0",tmp/"b1"; b0.mkdir(); b1.mkdir()

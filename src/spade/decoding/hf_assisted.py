@@ -7,6 +7,7 @@ latency is not representative of optimized speculative decoding.
 from __future__ import annotations
 from dataclasses import dataclass
 import time
+import inspect
 from typing import Any
 import torch
 from .autoregressive import load_causal_lm, validate_tokenizers, format_qwen_prompt
@@ -43,8 +44,18 @@ class QwenPair:
     @staticmethod
     def _logits(model, ids: list[int], device: torch.device) -> torch.Tensor:
         input_ids=torch.tensor([ids],dtype=torch.long,device=device)
+        kwargs={"input_ids":input_ids,"use_cache":False}
+        # Qwen3 can project only the final hidden state through its large LM
+        # head. Projecting every prompt position creates a [1, seq, vocab]
+        # tensor (about 5 GB at the observed 16k-token context).
+        try:
+            forward=getattr(model,"forward",model.__call__)
+            if "logits_to_keep" in inspect.signature(forward).parameters:
+                kwargs["logits_to_keep"]=1
+        except (TypeError,ValueError):
+            pass
         with torch.inference_mode():
-            return model(input_ids=input_ids,use_cache=False).logits[0,-1].float().to(device)
+            return model(**kwargs).logits[0,-1].float().to(device)
 
     @staticmethod
     def _sync(device: torch.device) -> None:
@@ -60,6 +71,9 @@ class QwenPair:
         if max_new_tokens < 1 or draft_length < 1: raise ValueError("Token limits must be positive")
         serialized=format_qwen_prompt(self.target_tokenizer,prompt)
         prompt_ids=self.target_tokenizer(serialized,return_tensors="pt",add_special_tokens=False)["input_ids"][0].tolist()
+        context_limit=getattr(getattr(self.target,"config",None),"max_position_embeddings",None)
+        if isinstance(context_limit,int) and len(prompt_ids)+max_new_tokens>context_limit:
+            raise ValueError(f"Prompt ({len(prompt_ids)} tokens) plus requested output ({max_new_tokens}) exceeds target context limit ({context_limit})")
         target_device=self._input_device(self.target); target_eos=self.target_tokenizer.eos_token_id
         if self.draft is not None and self._input_device(self.draft)!=target_device:
             raise RuntimeError("Target and draft embeddings are on different devices; current exact-sampling adapter requires a shared inference device")
