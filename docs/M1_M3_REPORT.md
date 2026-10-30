@@ -22,7 +22,7 @@ Processed distribution, acceptance, residual, TV, and expected acceptance primit
 No empirical measurements exist. No plots are fabricated. Trace fields and lexical overlap helpers exist; metrics are pending real traces. GPU memory/timing, factuality and semantic grounding are not evaluated.
 
 ## Limitations
-Transformers assisted generation, cache rollback, run recovery, full round/token instrumentation, complete plotting/notebook pipeline, and GPU validation are not implemented. Do not run official model benchmarks through the placeholder CLI.
+The first Hugging Face diagnostic adapter now supports B0/B0-S/B1/B2 with full-prefix recomputation and no KV cache. It exports round and token JSONL traces for speculative modes, but timings are explicitly non-authoritative and unsuitable for official performance claims. Cache optimization/rollback, run recovery, complete plotting, and GPU validation remain pending.
 
 ## M4 research questions
 Which claim/evidence features predict proposal mismatch? Can evidence conditioning change draft proposals while retaining exact correction? What trade-off appears across context length, draft length, and latency?

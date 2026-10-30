@@ -5,8 +5,10 @@ from spade.benchmark.benchmark_builder import build_examples, stratified_sample
 from spade.benchmark.averitec_loader import claim_id
 from spade.benchmark.evaluation import parse_generation
 from spade.benchmark.prompt_builder import build_prompt
-from spade.decoding.sampling import acceptance_probability, expected_acceptance, residual_distribution, total_variation
+from spade.decoding.sampling import acceptance_probability, expected_acceptance, residual_distribution, sample_distribution, total_variation
 from spade.decoding.speculative import exact_speculative_round
+from spade.decoding.hf_assisted import QwenPair
+from spade.instrumentation.trace_schema import ROUND_FIELDS, TOKEN_FIELDS, validate_record
 
 def sample_row():
     return {"id":1,"claim":"A test claim.","label":"Refuted","justification":"SECRET GOLD TEXT","questions":[{"question":"What?","answer":"Evidence."}]}
@@ -27,6 +29,24 @@ def test_sampling_identities_and_residual():
     assert expected_acceptance(p,q)==pytest.approx(1-total_variation(p,q))
     assert acceptance_probability(p,q,0).item()==1
     r=residual_distribution(p,q); assert r.tolist()==pytest.approx([1,0])
+
+@pytest.mark.parametrize("p_values,q_values",[
+    ([.5,.5],[.5,.5]),
+    ([.1,.9],[.9,.1]),
+    ([0.,.4,.6],[.7,.3,0.]),
+    ([0.,0.,1.],[1.,0.,0.]),
+    ([1.-1e-12,1e-12],[1e-12,1.-1e-12]),
+])
+def test_exact_speculative_empirical_distribution(p_values,q_values):
+    p=torch.tensor(p_values,dtype=torch.float64); q=torch.tensor(q_values,dtype=torch.float64)
+    g=torch.Generator().manual_seed(9217); n=5000; counts=torch.zeros_like(p,dtype=torch.int64)
+    for _ in range(n):
+        proposal=sample_distribution(q,g)
+        result=exact_speculative_round([proposal],[q],[p],generator=g,remaining=1)
+        counts[result.committed[0]]+=1
+    observed=counts.double()/n
+    tolerance=torch.maximum(torch.full_like(p,.025),5*torch.sqrt(p*(1-p)/n))
+    assert torch.all(torch.abs(observed-p)<=tolerance), (observed.tolist(),p.tolist())
 
 def test_disjoint_and_equal_support_residual():
     assert residual_distribution(torch.tensor([1.,0.]),torch.tensor([0.,1.])).tolist()==[1.,0.]
@@ -59,3 +79,30 @@ def test_oracle_adapter_supports_nested_averitec_answers():
     ex=build_examples([{**sample_row(),"questions":[{"question":"Q?","answers":[{"answer":"A.","source_url":"https://example.test"}]}]}],"oracle_qa")[0]
     assert ex["evidence"][0]["text"]=="Q? A."
     assert ex["evidence"][0]["source_url"]=="https://example.test"
+
+class _TinyTokenizer:
+    eos_token_id=2; pad_token_id=0
+    def apply_chat_template(self, messages, **kwargs): return messages[0]["content"]
+    def __call__(self, text, **kwargs): return {"input_ids":torch.tensor([[0,1]])}
+    def decode(self, ids, **kwargs): return "".join(str(i) for i in ids)
+
+class _TinyModel:
+    def __init__(self): self.embedding=torch.nn.Embedding(3,2)
+    def get_input_embeddings(self): return self.embedding
+    def __call__(self, input_ids, use_cache=False):
+        logits=torch.tensor([0.,2.,-4.]).view(1,1,3).expand(1,input_ids.shape[1],3)
+        return type("Output",(),{"logits":logits})()
+
+def _tiny_pair():
+    pair=QwenPair.__new__(QwenPair); pair.target_tokenizer=_TinyTokenizer(); pair.draft_tokenizer=_TinyTokenizer()
+    pair.target=_TinyModel(); pair.draft=_TinyModel(); return pair
+
+def test_hf_adapter_tiny_greedy_and_exact_sampling_are_bounded():
+    pair=_tiny_pair()
+    greedy=pair.generate("claim",mode="B1",max_new_tokens=3,draft_length=2)
+    exact=pair.generate("claim",mode="B2",max_new_tokens=3,draft_length=2,seed=7)
+    assert greedy.token_ids==[1,1,1]
+    assert len(exact.token_ids)==3
+    assert exact.timings["decode_s"]>=0
+    for row in greedy.rounds + exact.rounds: validate_record(row,ROUND_FIELDS)
+    for row in greedy.token_traces + exact.token_traces: validate_record(row,TOKEN_FIELDS)

@@ -1,6 +1,6 @@
 # Linux GPU server runbook
 
-**Readiness:** benchmark preparation and CPU sampling primitives are available. B0–B2 model inference and M3 model-generated traces are **not ready**: `scripts/run_baselines.py` intentionally exits until a cache-safe Qwen adapter is implemented and tested. Do not interpret that placeholder as an executable experiment.
+**Readiness:** benchmark preparation and CPU sampling primitives are available. A diagnostic B0–B2 Hugging Face adapter now uses full-prefix recomputation without KV cache. It is intended only for short correctness/integration smoke runs; timing is explicitly non-authoritative. Optimized cache handling, full M3 trace export, and real GPU validation remain pending.
 
 ## A. Repository synchronization
 
@@ -51,13 +51,13 @@ Retrieved mode requires `--retrieved "$DATA_ROOT/processed/retrieved_dev.json" -
 
 ## F. M2 baseline execution
 
-The interface is reserved but currently guarded; do not execute it expecting inference:
+Example diagnostic run (not a performance benchmark):
 
 ```bash
-python scripts/run_baselines.py --mode B0 --input benchmark.jsonl --output outputs/run
+python scripts/run_baselines.py --mode B1 --input benchmark.jsonl --target /path/to/Qwen3-8B --draft /path/to/Qwen3-0.6B --max-new-tokens 16 --draft-length 2 --limit 3 --output-root outputs/runs
 ```
 
-This exits with an explicit pending-adapter error. B0, B0-S, B1, B2 sweeps, warmups, repeated trials, and three-claim GPU smoke tests cannot be run until model/cache integration is completed. Do not claim GPU validation.
+The adapter writes an immutable run directory with raw/parsed generations, `round_traces.jsonl`, and `token_traces.jsonl` and reports `timings_authoritative: false`, because it recomputes full prefixes and does not use KV cache. Do not use these timings for official latency/speedup claims. B0–B2 GPU behavior still needs server validation.
 
 ## G. M3 analysis
 
