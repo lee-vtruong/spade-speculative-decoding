@@ -32,7 +32,7 @@ def exact_speculative_round(proposals: list[int], q_distributions: list[torch.Te
         if i>=limit: break
         acc=acceptance_probability(p_distributions[i],q_distributions[i],token)
         draw=float(torch.rand((),device=q_distributions[i].device,generator=generator).item())
-        if draw <= float(acc.item()):
+        if draw < float(acc.item()):
             statuses[i]="accepted"; committed.append(token)
             if token==eos_token_id: return RoundResult(committed,proposals,i+1,None,statuses,None,None,False)
             continue
