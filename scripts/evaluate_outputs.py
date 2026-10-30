@@ -8,7 +8,7 @@ def mean(values): return statistics.mean(values) if values else 0.0
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument("predictions",type=Path); p.add_argument("--output-dir",type=Path)
 a=p.parse_args()
-rows=[json.loads(x) for x in a.predictions.read_text(encoding="utf-8").splitlines() if x.strip()]
+rows=[json.loads(x) for x in a.predictions.read_text(encoding="utf-8").split("\n") if x.strip()]
 parsed=[parse_generation(x.get("raw_text",""),set(x.get("evidence_ids",[]))) for x in rows]
 valid_pairs=[(str(x.get("evaluation",{}).get("gold_label")),pr["mapped_label"]) for x,pr in zip(rows,parsed) if pr["parse_success"] and x.get("evaluation",{}).get("gold_label") is not None]
 summary_lengths=[pr["summary_chars"] for pr in parsed if pr["summary_chars"] is not None]

@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 def read_jsonl(path: Path):
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # splitlines() treats Unicode separators such as U+2028 as record breaks,
+    # even though they are valid characters inside JSON strings.
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
 
 def write_json(path: Path, value): path.write_text(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)+"\n",encoding="utf-8")
 

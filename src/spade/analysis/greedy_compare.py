@@ -9,7 +9,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _read_predictions(path: Path) -> dict[str, dict[str, Any]]:
     rows={}
-    for line_no,line in enumerate(path.read_text(encoding="utf-8").splitlines(),1):
+    for line_no,line in enumerate(path.read_text(encoding="utf-8").split("\n"),1):
         if not line.strip(): continue
         row=json.loads(line); cid=str(row["claim_id"])
         if cid in rows: raise ValueError(f"Duplicate claim_id {cid!r} in {path}:{line_no}")

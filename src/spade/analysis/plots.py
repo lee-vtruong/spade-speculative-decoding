@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 def _read_json(path: Path): return json.loads(path.read_text(encoding="utf-8"))
-def _read_jsonl(path: Path): return [json.loads(s) for s in path.read_text(encoding="utf-8").splitlines() if s.strip()] if path.exists() else []
+def _read_jsonl(path: Path): return [json.loads(s) for s in path.read_text(encoding="utf-8").split("\n") if s.strip()] if path.exists() else []
 def _csv(path: Path,rows: list[dict],fields: list[str] | None=None):
     path.parent.mkdir(parents=True,exist_ok=True)
     cols=fields or sorted({k for row in rows for k in row})

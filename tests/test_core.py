@@ -13,6 +13,7 @@ from spade.decoding.speculative import exact_speculative_round
 from spade.decoding.hf_assisted import QwenPair
 from spade.instrumentation.trace_schema import ROUND_FIELDS, TOKEN_FIELDS, validate_record
 from spade.analysis.greedy_compare import compare_greedy_runs
+from scripts.run_baselines import read_jsonl
 
 def sample_row():
     return {"id":1,"claim":"A test claim.","label":"Refuted","justification":"SECRET GOLD TEXT","questions":[{"question":"What?","answer":"Evidence."}]}
@@ -187,3 +188,9 @@ def test_greedy_run_comparison_checks_claim_prompt_and_tokens():
         (b1/"predictions.jsonl").write_text(json.dumps({**record,"token_ids":[1,9]})+"\n")
         report=compare_greedy_runs(b0,b1)
         assert not report["all_match"] and report["comparisons"][0]["first_mismatch_position"]==1
+
+def test_jsonl_reader_preserves_unicode_line_separator_inside_json_string():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+        path=Path(temp)/"unicode.jsonl"
+        path.write_text(json.dumps({"text":"alpha\u2028beta"},ensure_ascii=False)+"\n",encoding="utf-8")
+        assert read_jsonl(path)==[{"text":"alpha\u2028beta"}]

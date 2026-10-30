@@ -13,8 +13,8 @@ a.output_dir.mkdir(parents=True,exist_ok=True)
 rounds=[]; tokens=[]
 for root in a.run_dirs:
     config=json.loads((root/"config_resolved.json").read_text(encoding="utf-8")); mode=config.get("mode")
-    rr=[json.loads(x) for x in (root/"round_traces.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
-    tt=[json.loads(x) for x in (root/"token_traces.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    rr=[json.loads(x) for x in (root/"round_traces.jsonl").read_text(encoding="utf-8").split("\n") if x.strip()]
+    tt=[json.loads(x) for x in (root/"token_traces.jsonl").read_text(encoding="utf-8").split("\n") if x.strip()]
     for row in rr+tt: row.setdefault("mode",mode)
     rounds.extend(rr); tokens.extend(tt)
 summary=acceptance_summary([x for x in tokens if x.get("mode")=="B2"],[x for x in rounds if x.get("mode")=="B2"])

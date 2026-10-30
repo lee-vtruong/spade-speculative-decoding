@@ -18,7 +18,7 @@ def load_records(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError("Expected a list of record objects")
         return value
     except json.JSONDecodeError:
-        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        rows = [json.loads(line) for line in text.split("\n") if line.strip()]
         if not all(isinstance(x, dict) for x in rows): raise ValueError("JSONL rows must be objects")
         return rows
 
