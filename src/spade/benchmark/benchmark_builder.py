@@ -36,7 +36,8 @@ def build_examples(rows: list[dict[str, Any]], mode: str, retrieved: dict[str, l
 
 def build_manifest(*, dataset_path: str, dataset_hash: str, split: str, seed: int, mode: str,
                    top_k: int, examples: list[dict[str, Any]], token_lengths: list[int] | None = None,
-                   retrieval_audit: dict[str, Any] | None = None) -> dict[str, Any]:
+                   retrieval_audit: dict[str, Any] | None = None,
+                   excluded_dataset_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     evidence_counts=[len(x["evidence"]) for x in examples]
     labels={}
     for x in examples:
@@ -49,4 +50,4 @@ def build_manifest(*, dataset_path: str, dataset_hash: str, split: str, seed: in
             "dataset_sha256":dataset_hash,"split":split,"selected_claim_ids":[x["claim_id"] for x in examples],"sampling_seed":seed,
             "evidence_mode":mode,"evidence_top_k":top_k,"prompt_template_version":"spade_factcheck_v1",
             "prompt_hashes":{x["claim_id"]:x["prompt_hash"] for x in examples},"token_lengths_include_chat_template":token_lengths is not None,
-            "statistics":stats,"retrieval_audit":retrieval_audit}
+            "statistics":stats,"retrieval_audit":retrieval_audit,"excluded_dataset_rows":excluded_dataset_rows or []}

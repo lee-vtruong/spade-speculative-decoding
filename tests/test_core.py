@@ -117,10 +117,19 @@ def test_claim_only_store_excludes_gold_qa_and_other_query_types():
         assert audit["query_types_seen"]["question"]==1 and audit["query_type_allowlist"]==["claim"]
 
 def test_claim_only_store_reports_invalid_dataset_row():
-    import pytest
     with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
-        with pytest.raises(ValueError, match=r"row 0 .*keys=\['id', 'label'\]"):
-            load_claim_only_knowledge_store([{"id":"x","label":"True"}],temp)
+        mapped,audit=load_claim_only_knowledge_store([{"id":"x","label":"True"}],temp)
+        assert mapped=={}
+        assert audit["invalid_dataset_rows"]==[{"row_index":0,"keys":["id","label"],"reason":"Claim x has no claim text"}]
+
+def test_claim_only_store_keeps_original_file_indices_when_dataset_row_is_invalid():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+        store=Path(temp)
+        rows=[{"claim":"first"},{"claim":"","label":"Refuted"},{"claim":"third"}]
+        (store/"2.json").write_text(json.dumps({"claim_id":"2","type":"claim","query":"third","url":"u","url2text":["third passage"]}),encoding="utf-8")
+        mapped,audit=load_claim_only_knowledge_store(rows,store)
+        assert mapped[claim_id(rows[2])][0]["text"]=="third passage"
+        assert audit["invalid_dataset_rows"][0]["row_index"]==1
 
 def test_manifest_tracks_ids_hashes_and_token_lengths():
     rows=[sample_row()]; examples=build_examples(rows,"oracle_qa")

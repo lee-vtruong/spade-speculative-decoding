@@ -62,14 +62,15 @@ def load_claim_only_knowledge_store(dataset_rows: list[dict[str, Any]], store_di
     A row is accepted only when its stored query equals the original claim.
     """
     if top_k<1: raise ValueError("top_k must be positive")
-    root=Path(store_dir); mapped={}; counts={}; missing=[]; query_mismatch=0; empty_text=0; claim_id_mismatch=0
+    root=Path(store_dir); mapped={}; counts={}; missing=[]; invalid_rows=[]; query_mismatch=0; empty_text=0; claim_id_mismatch=0
     for index,row in enumerate(dataset_rows):
         try:
             cid=claim_id(row)
             claim=claim_text(row)
         except (ValueError, AttributeError) as exc:
             keys=sorted(row) if isinstance(row,dict) else []
-            raise ValueError(f"Invalid AVeriTeC dataset record at row {index} (keys={keys}): {exc}") from exc
+            invalid_rows.append({"row_index":index,"keys":keys,"reason":str(exc)})
+            continue
         path=root/f"{index}.json"
         if not path.is_file(): missing.append(index); continue
         passages=[]; seen=set()
@@ -91,7 +92,7 @@ def load_claim_only_knowledge_store(dataset_rows: list[dict[str, Any]], store_di
                     passages.append({"text":text,"source_url":item.get("url"),"rank":len(passages)+1,"score":None,
                                      "provenance":"averitec_knowledge_store:exact_claim_query","store_row":line_no})
         mapped[cid]=passages
-    audit={"store_dir":str(root.resolve()),"files_expected":len(dataset_rows),"files_missing":missing,"query_types_seen":counts,
+    audit={"store_dir":str(root.resolve()),"files_expected":len(dataset_rows),"files_missing":missing,"invalid_dataset_rows":invalid_rows,"query_types_seen":counts,
            "claim_id_mismatch_rows":claim_id_mismatch,"exact_claim_query_rows_rejected":query_mismatch,"empty_passages":empty_text,"query_type_allowlist":["claim"],
            "claim_query_exact_match_required":True,"top_k":top_k}
     return mapped,audit
