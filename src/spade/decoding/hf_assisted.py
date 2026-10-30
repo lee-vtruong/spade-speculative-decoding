@@ -88,15 +88,16 @@ class QwenPair:
                 if token==target_eos: break
             self._sync(draft_device); draft_s=time.perf_counter()-d0; timings["draft_generation_s"]+=draft_s
             t0=time.perf_counter()
-            # Causal position i predicts proposed[i]; final position predicts extra target token.
-            full_ids=prefix+proposed
-            with torch.inference_mode():
-                full_logits=self.target(input_ids=torch.tensor([full_ids],device=target_device),use_cache=False).logits[0].float()
+            # Recompute the exact committed prefix at each position. This mirrors
+            # B0's call shape and avoids block-length/backend rounding differences.
+            verification_prefix=list(prefix)
+            for proposed_token in proposed:
+                logits=self._logits(self.target,verification_prefix,target_device)
+                p_dists.append(processed_distribution(logits,temperature,top_k,top_p))
+                verification_prefix.append(proposed_token)
+            extra_logits=self._logits(self.target,verification_prefix,target_device)
+            target_extra=processed_distribution(extra_logits,temperature,top_k,top_p)
             self._sync(target_device); target_s=time.perf_counter()-t0
-            offset=len(prefix)-1
-            for i in range(len(proposed)):
-                p_dists.append(processed_distribution(full_logits[offset+i],temperature,top_k,top_p))
-            target_extra=processed_distribution(full_logits[offset+len(proposed)],temperature,top_k,top_p) if len(full_ids)>0 else None
             timings["target_verification_s"]+=target_s
             c0=time.perf_counter()
             generation_start=len(generated)
@@ -114,7 +115,7 @@ class QwenPair:
                 else: status=["accepted"]*len(accepted)+["discarded_after_rejection"]*(len(proposed)-len(accepted))
                 extra=None
                 if rejection is None and len(accepted)==len(proposed) and len(accepted)<remaining and (not accepted or accepted[-1]!=target_eos):
-                    extra=int(torch.argmax(full_logits[offset+len(proposed)]).item()); accepted.append(extra)
+                    extra=int(torch.argmax(extra_logits).item()); accepted.append(extra)
                 generated.extend(accepted)
                 accepted_draft=sum(s=="accepted" for s in status)
             else:
@@ -136,7 +137,7 @@ class QwenPair:
                 token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+generation_start+i,"token_id":token,"token_text":token_text,"draft_probability":qprob,"target_probability":prob,"acceptance_probability":ap if mode=="B2" else None,"status":st,"reached_by_verifier":reached,"discarded_after_rejection":st=="discarded_after_rejection","replacement_token_id":None,"token_category":categorize_token(token_text),"prefix_length":len(prompt_ids)+generation_start,"evidence_overlap":evidence_overlap(token_text,evidence_texts or [])})
             if extra is not None:
                 extra_text=self.target_tokenizer.decode([extra])
-                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+len(generated)-1,"token_id":extra,"token_text":extra_text,"draft_probability":None,"target_probability":float(target_extra[extra].item()),"acceptance_probability":None,"status":"extra_target_token","reached_by_verifier":False,"discarded_after_rejection":False,"replacement_token_id":None,"token_category":categorize_token(extra_text),"prefix_length":len(prompt_ids)+generation_start+len(proposed),"evidence_overlap":evidence_overlap(extra_text,evidence_texts or [])})
+                token_rows.append({"run_id":run_id,"claim_id":claim_id,"round_id":round_index,"absolute_token_position":len(prompt_ids)+len(generated)-1,"token_id":extra,"token_text":extra_text,"draft_probability":None,"target_probability":float(target_extra[extra].item()) if mode=="B2" else 1.0,"acceptance_probability":None,"status":"extra_target_token","reached_by_verifier":False,"discarded_after_rejection":False,"replacement_token_id":None,"token_category":categorize_token(extra_text),"prefix_length":len(prompt_ids)+generation_start+len(proposed),"evidence_overlap":evidence_overlap(extra_text,evidence_texts or [])})
             round_rows.append({"run_id":run_id,"claim_id":claim_id,"round_index":round_index,"prefix_length":len(prefix),"draft_length_requested":draft_length,"proposed_token_count":len(proposed),"accepted_draft_tokens":accepted_draft,"rejection_position":rejection,"full_acceptance":rejection is None and accepted_draft==len(proposed),"additional_target_token":extra is not None,"committed_output_tokens":len(generated)-generated_before,"draft_latency_s":draft_s,"verification_latency_s":target_s,"correction_latency_s":correction_s,"total_round_latency_s":time.perf_counter()-rstart,"cumulative_generated_tokens":len(generated)})
             if generated and generated[-1]==target_eos: break
             round_index+=1

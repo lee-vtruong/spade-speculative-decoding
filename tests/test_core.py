@@ -107,6 +107,7 @@ def test_hf_adapter_tiny_greedy_and_exact_sampling_are_bounded():
     assert greedy.token_ids==[1,1,1]
     assert len(exact.token_ids)==3
     assert exact.timings["decode_s"]>=0
+    assert all(t["target_probability"]==1.0 for t in greedy.token_traces if t["status"]=="extra_target_token")
     for row in greedy.rounds + exact.rounds: validate_record(row,ROUND_FIELDS)
     for row in greedy.token_traces + exact.token_traces: validate_record(row,TOKEN_FIELDS)
 
