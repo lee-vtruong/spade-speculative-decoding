@@ -59,6 +59,14 @@ python scripts/run_baselines.py --mode B1 --input benchmark.jsonl --target /path
 
 The adapter writes an immutable run directory with raw/parsed generations, `round_traces.jsonl`, and `token_traces.jsonl` and reports `timings_authoritative: false`, because it recomputes full prefixes and does not use KV cache. Do not use these timings for official latency/speedup claims. B0–B2 GPU behavior still needs server validation.
 
+To check B0/B1 greedy equality, run both on the same prepared JSONL, same target, dtype, token limit, and claim limit, then compare their run directories:
+
+```bash
+python scripts/run_baselines.py --mode B0 --input benchmark.jsonl --target /path/to/Qwen3-8B --dtype bfloat16 --max-new-tokens 64 --limit 3 --run-id b0-smoke --output-root outputs/runs
+python scripts/run_baselines.py --mode B1 --input benchmark.jsonl --target /path/to/Qwen3-8B --draft /path/to/Qwen3-0.6B --dtype bfloat16 --draft-length 4 --max-new-tokens 64 --limit 3 --run-id b1-smoke --output-root outputs/runs
+python scripts/compare_greedy.py outputs/runs/b0-smoke outputs/runs/b1-smoke
+```
+
 ## G. M3 analysis
 
 `scripts/analyze_traces.py` accepts schema-compatible JSONL and writes aggregate JSON:

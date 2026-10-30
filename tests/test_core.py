@@ -1,4 +1,6 @@
 import json
+import tempfile
+from pathlib import Path
 import pytest
 torch=pytest.importorskip("torch")
 from spade.benchmark.benchmark_builder import build_examples, stratified_sample
@@ -9,6 +11,7 @@ from spade.decoding.sampling import acceptance_probability, expected_acceptance,
 from spade.decoding.speculative import exact_speculative_round
 from spade.decoding.hf_assisted import QwenPair
 from spade.instrumentation.trace_schema import ROUND_FIELDS, TOKEN_FIELDS, validate_record
+from spade.analysis.greedy_compare import compare_greedy_runs
 
 def sample_row():
     return {"id":1,"claim":"A test claim.","label":"Refuted","justification":"SECRET GOLD TEXT","questions":[{"question":"What?","answer":"Evidence."}]}
@@ -106,3 +109,16 @@ def test_hf_adapter_tiny_greedy_and_exact_sampling_are_bounded():
     assert exact.timings["decode_s"]>=0
     for row in greedy.rounds + exact.rounds: validate_record(row,ROUND_FIELDS)
     for row in greedy.token_traces + exact.token_traces: validate_record(row,TOKEN_FIELDS)
+
+def test_greedy_run_comparison_checks_claim_prompt_and_tokens():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+        tmp=Path(temp); b0,b1=tmp/"b0",tmp/"b1"; b0.mkdir(); b1.mkdir()
+        (b0/"config_resolved.json").write_text(json.dumps({"mode":"B0","target":"t","dtype":"bf16","max_new_tokens":4}))
+        (b1/"config_resolved.json").write_text(json.dumps({"mode":"B1","target":"t","dtype":"bf16","max_new_tokens":4}))
+        record={"claim_id":"c1","prompt_hash":"abc","token_ids":[1,2,3]}
+        (b0/"predictions.jsonl").write_text(json.dumps(record)+"\n")
+        (b1/"predictions.jsonl").write_text(json.dumps(record)+"\n")
+        assert compare_greedy_runs(b0,b1)["all_match"]
+        (b1/"predictions.jsonl").write_text(json.dumps({**record,"token_ids":[1,9]})+"\n")
+        report=compare_greedy_runs(b0,b1)
+        assert not report["all_match"] and report["comparisons"][0]["first_mismatch_position"]==1
