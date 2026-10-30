@@ -21,12 +21,14 @@ p.add_argument("--knowledge-store-dir",type=Path,help="Read-only per-claim JSONL
 p.add_argument("--size",default="3",help="3, 100, 200, or full")
 p.add_argument("--top-k",type=int,default=8); p.add_argument("--seed",type=int,default=42)
 p.add_argument("--tokenizer",help="Local tokenizer path/ID for chat-template input token statistics")
+p.add_argument("--max-evidence-tokens",type=int,default=2048,help="Clip each evidence item to this many tokenizer tokens")
 p.add_argument("--manifest",type=Path,help="Defaults to OUTPUT.manifest.json")
 a=p.parse_args()
 if a.retrieved and a.knowledge_store_dir: p.error("Use only one of --retrieved and --knowledge-store-dir")
 if a.mode=="retrieved" and not (a.retrieved or a.knowledge_store_dir): p.error("retrieved mode requires --retrieved or --knowledge-store-dir")
 if a.mode=="oracle_qa" and (a.retrieved or a.knowledge_store_dir): p.error("oracle_qa does not accept retrieved evidence")
 if a.top_k<1: p.error("--top-k must be positive")
+if a.max_evidence_tokens<1: p.error("--max-evidence-tokens must be positive")
 source_rows=load_records(a.dataset)
 all_rows=[]; excluded=[]
 for source_index,row in enumerate(source_rows):
@@ -44,14 +46,29 @@ if a.knowledge_store_dir:
 elif a.retrieved:
     retrieved=json.loads(a.retrieved.read_text(encoding="utf-8"))
     if not isinstance(retrieved,dict): p.error("--retrieved must contain a JSON object mapping claim IDs to passage arrays")
+tok=None
+if a.tokenizer:
+    from transformers import AutoTokenizer
+    tok=AutoTokenizer.from_pretrained(a.tokenizer,local_files_only=True)
+if retrieved is not None and tok is not None:
+    clipped_items=0
+    for passages in retrieved.values():
+        for passage in passages:
+            text=passage.get("text") or passage.get("passage") or passage.get("content")
+            if not isinstance(text,str) or not text.strip(): continue
+            ids=tok(text,add_special_tokens=False,truncation=True,max_length=a.max_evidence_tokens)["input_ids"]
+            clipped=tok.decode(ids,skip_special_tokens=True)
+            if clipped.strip()!=text.strip(): clipped_items+=1
+            passage["text"]=clipped
+    if retrieval_audit is not None:
+        retrieval_audit["evidence_items_clipped"]=clipped_items
+        retrieval_audit["max_evidence_tokens"] = a.max_evidence_tokens
 examples=build_examples(rows,a.mode,retrieved,a.top_k)
 if a.mode=="retrieved" and not any(ex["evidence"] for ex in examples):
     p.error("No eligible retrieved passages for selected examples. Check per-claim files and exact type=claim query provenance; no oracle fallback is applied.")
 token_lengths=None
 if a.tokenizer:
-    from transformers import AutoTokenizer
     from spade.decoding.autoregressive import format_qwen_prompt
-    tok=AutoTokenizer.from_pretrained(a.tokenizer,local_files_only=True)
     token_lengths=[]
     for ex in examples:
         serialized=format_qwen_prompt(tok,ex["prompt"])

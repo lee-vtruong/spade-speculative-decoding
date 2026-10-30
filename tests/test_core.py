@@ -143,6 +143,10 @@ def test_oracle_adapter_supports_nested_averitec_answers():
     assert ex["evidence"][0]["text"]=="Q? A."
     assert ex["evidence"][0]["source_url"]=="https://example.test"
 
+def test_oracle_evidence_respects_top_k():
+    row={**sample_row(),"questions":[{"question":f"Q{i}?","answers":[{"answer":f"A{i}."}]} for i in range(5)]}
+    assert len(build_examples([row],"oracle_qa",top_k=2)[0]["evidence"])==2
+
 class _TinyTokenizer:
     eos_token_id=2; pad_token_id=0
     def apply_chat_template(self, messages, **kwargs): return messages[0]["content"]

@@ -27,7 +27,7 @@ def build_examples(rows: list[dict[str, Any]], mode: str, retrieved: dict[str, l
     result=[]
     for row in rows:
         cid=claim_id(row)
-        evidence=oracle_evidence(row) if mode == "oracle_qa" else retrieved_evidence(row, (retrieved or {}).get(cid), top_k)
+        evidence=oracle_evidence(row)[:top_k] if mode == "oracle_qa" else retrieved_evidence(row, (retrieved or {}).get(cid), top_k)
         prompt, digest=build_prompt(claim_text(row), evidence, mode)
         # Evaluation-only fields are structurally separate; never pass this object directly to a model.
         result.append({"claim_id":cid,"claim":claim_text(row),"evidence":evidence,"prompt":prompt,"prompt_hash":digest,"evidence_mode":mode,
