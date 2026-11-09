@@ -1,14 +1,31 @@
-# M1–M3 experiment matrix
+# SPADE M1–M3 Experiment Matrix
 
-| Milestone | Experiment | Input/evidence | Main artifacts | Status |
-|---|---|---|---|---|
-| M1 | Oracle QA diagnostic | AVeriTeC questions and answers | JSONL benchmark + manifest | Implemented; user smoke run passed |
-| M1 | Retrieved evidence | Exact claim-query passages from read-only knowledge store | JSONL benchmark + retrieval audit/manifest | Implemented; audit coverage before full run |
-| M2 | B0 target greedy | Same prepared prompts as B1 | Predictions, timings, traces | Implemented; user-reported 3-claim comparison passed |
-| M2 | B1 greedy speculative, k=2/4/6/8 | Target + draft models | Predictions, timings, round/token traces | Implemented; no-cache correctness path |
-| M2 | B0-S target sampling | Fixed temperature/top-k/top-p and seed | Predictions, traces | Implemented |
-| M2 | B2 exact speculative sampling, k=2/4/6/8 | Same target sampling policy | Predictions, acceptance/rejection traces | Implemented; GPU distribution calibration outstanding |
-| M3 | Rejection analysis | Real M2 run directories | JSON summary, CSV tables, PNG plots | Implemented; run after experiments |
-| M3 | Output evaluation | Prediction JSONL + held-out gold metadata | Parse/citation/verdict metrics | Implemented; factuality is not evaluated |
+This document defines the baseline experimental matrix for comparing autoregressive and speculative decoding policies under exact match conditions on the AVeriTeC fact-checking benchmark.
 
-The current Hugging Face model adapter recomputes full prefixes without KV cache. Its latency and any derived speedup are diagnostic only; authoritative performance results require a validated cache-based adapter. See [SERVER_RUNBOOK.md](SERVER_RUNBOOK.md) for server commands and safe data paths.
+---
+
+## 1. Official Experiment Matrix (E0–E6)
+
+| ID | Configuration | Decoding Method | Speculation Length ($K$) | Target Model | Draft Model | Sampling Settings | Cache Strategy |
+|---|---|---|---|---|---|---|---|
+| **E0** | B0 Reference | Target-only greedy | N/A | Qwen3-8B | None | Deterministic ($\arg\max$) | `kv_cache` / `recompute` |
+| **E1** | B1 Speculative | Greedy speculative | 4 | Qwen3-8B | Qwen3-0.6B | Deterministic ($\arg\max$) | `kv_cache` / `recompute` |
+| **E2** | B0-S Reference | Target-only sampling | N/A | Qwen3-8B | None | $T=0.7$, Top-P=0.9 | `kv_cache` / `recompute` |
+| **E3** | B2 Speculative | Exact speculative sampling | 2 | Qwen3-8B | Qwen3-0.6B | $T=0.7$, Top-P=0.9 | `kv_cache` / `recompute` |
+| **E4** | B2 Speculative | Exact speculative sampling | 4 | Qwen3-8B | Qwen3-0.6B | $T=0.7$, Top-P=0.9 | `kv_cache` / `recompute` |
+| **E5** | B2 Speculative | Exact speculative sampling | 6 | Qwen3-8B | Qwen3-0.6B | $T=0.7$, Top-P=0.9 | `kv_cache` / `recompute` |
+| **E6** | B2 Speculative | Exact speculative sampling | 8 | Qwen3-8B | Qwen3-0.6B | $T=0.7$, Top-P=0.9 | `kv_cache` / `recompute` |
+
+---
+
+## 2. Experimental Controls & Guidelines
+
+1. **Greedy vs. Stochastic Separation**:
+   - Greedy runs (E0, E1) must only be compared against each other. Output token IDs must match exactly under equivalent numerical settings.
+   - Stochastic runs (E2–E6) must only be compared against each other with identical sampling distributions ($T=0.7$, $p=0.9$).
+2. **Output Length Normalization**:
+   - Both target and speculative runs record total output tokens to prevent distortions in throughput and speedup metrics.
+3. **Hardware & Environment Metadata**:
+   - Every run stores an immutable `environment.json` containing GPU model, VRAM, PyTorch/CUDA versions, Transformers version, and Git commit hash.
+4. **Reproducibility**:
+   - Random seeds are fixed and explicitly recorded in `config_resolved.json`.

@@ -1,0 +1,80 @@
+[
+  {
+    "id": 0,
+    "claim": "COVID-19 vaccines do not alter human DNA.",
+    "claim_date": "2021-03-15",
+    "speaker": "World Health Organization",
+    "label": "Supported",
+    "justification": "mRNA vaccines instruct cells to make spike protein and do not enter the cell nucleus where DNA resides.",
+    "questions": [
+      {
+        "question": "Can mRNA vaccines alter DNA?",
+        "answers": [
+          {
+            "answer": "No, mRNA from vaccines never enters the nucleus of cells where DNA is kept.",
+            "source_url": "https://who.int/vaccines-dna",
+            "boolean_explanation": "Directly supports claim"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 1,
+    "claim": "Eating carrots gives you night vision capability equal to infrared cameras.",
+    "claim_date": "2020-05-10",
+    "speaker": "Social Media Post",
+    "label": "Refuted",
+    "justification": "While vitamin A supports eye health, carrots do not provide infrared night vision.",
+    "questions": [
+      {
+        "question": "Does eating carrots grant superhuman night vision?",
+        "answers": [
+          {
+            "answer": "Carrots contain beta-carotene which prevents vitamin A deficiency, but cannot enable military-grade night vision.",
+            "source_url": "https://scientificamerican.com/carrots-vision",
+            "boolean_explanation": "Refutes the claim"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "claim": "The pyramids of Giza were constructed using levitation acoustic sound waves.",
+    "claim_date": "2022-01-20",
+    "speaker": "Conspiracy Blog",
+    "label": "Not Enough Evidence",
+    "justification": "There is no archaeological evidence supporting acoustic levitation for stone block transportation.",
+    "questions": [
+      {
+        "question": "Is there evidence for acoustic levitation in ancient Egypt?",
+        "answers": [
+          {
+            "answer": "Mainstream Egyptology documents sledge transport and ramps, with no record of sound-wave levitation.",
+            "source_url": "https://history.com/pyramid-construction"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "claim": "Coffee consumption reduces mortality rates.",
+    "claim_date": "2019-11-04",
+    "speaker": "Health News",
+    "label": "Conflicting Evidence/Cherry-picking",
+    "justification": "Observational studies show correlation with lower mortality, but high caffeine intake correlates with risks in other cohorts.",
+    "questions": [
+      {
+        "question": "Does coffee reduce mortality?",
+        "answers": [
+          {
+            "answer": "Some studies observe reduced all-cause mortality, while others note confounding factors and cardiovascular risks with heavy intake.",
+            "source_url": "https://bmj.com/coffee-mortality"
+          }
+        ]
+      }
+    ]
+  }
+]

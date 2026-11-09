@@ -1,0 +1,5 @@
+{"claim_id": "0", "type": "gold", "query": "_", "url": "https://secret.gold", "url2text": ["Gold justification text that must never leak."]}
+{"claim_id": "0", "type": "question", "query": "Can mRNA alter DNA?", "url": "https://qa.source", "url2text": ["QA text that is excluded from retrieved mode."]}
+{"claim_id": "0", "type": "claim", "query": "COVID-19 vaccines do not alter human DNA.", "url": "https://cdc.gov/mrna-facts", "url2text": ["CDC fact sheet: mRNA vaccines do not interact with our DNA in any way."]}
+{"claim_id": "0", "type": "claim", "query": "COVID-19 vaccines do not alter human DNA.", "url": "https://who.int/facts", "url2text": ["WHO advisory: Genetic material inside mRNA degrades rapidly outside nucleus."]}
+{"claim_id": "0", "type": "gpt_question", "query": "Do vaccines alter DNA?", "url": "https://gpt.test", "url2text": ["GPT generated question passage."]}
