@@ -29,6 +29,7 @@ def main():
     p.add_argument("--temperature",type=float,default=1.0); p.add_argument("--top-k",type=int,default=0); p.add_argument("--top-p",type=float,default=1.0)
     p.add_argument("--seed",type=int,default=42); p.add_argument("--limit",type=int,default=None)
     p.add_argument("--warmup",type=int,default=0); p.add_argument("--trials",type=int,default=1)
+    p.add_argument("--cache-strategy",choices=["recompute","kv_cache"],default="recompute",help="Inference cache strategy: recompute (default) or kv_cache")
     a=p.parse_args()
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0: p.error("Invalid token/warmup/trial count")
     rows=read_jsonl(a.input)
@@ -47,7 +48,8 @@ def main():
         from spade.instrumentation.trace_writer import TraceWriter
     except ImportError as exc: raise SystemExit(f"Required runtime dependency missing: {exc}") from exc
     pair=QwenPair(a.target,None if a.mode in {"B0","B0-S"} else a.draft,local_files_only=True,dtype=a.dtype)
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"trials":a.trials,"cache_strategy":"full_prefix_recomputation","timings_authoritative":False,"timing_note":"No KV cache; correctness/rejection diagnostic path only."}
+    is_kv = (a.cache_strategy == "kv_cache")
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
     env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None}
     try: env["git_commit"]=subprocess.check_output(["git","rev-parse","HEAD"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
@@ -60,7 +62,7 @@ def main():
     canonical=[]; trial_rows=[]
     with (out/"predictions.jsonl").open("x",encoding="utf-8") as prediction_file, (out/"trial_metrics.jsonl").open("x",encoding="utf-8") as trial_file:
         for index,row in enumerate(rows):
-            common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p}
+            common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy}
             for warm in range(a.warmup):
                 pair.generate(row["prompt"],**common,seed=a.seed+index,run_id=f"{run_id}-warmup{warm}",claim_id=str(row["claim_id"]))
             evidence_texts=[e.get("text","") for e in row.get("evidence",[])]

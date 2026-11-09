@@ -4,6 +4,7 @@ import argparse,json
 from pathlib import Path
 from spade.analysis.metrics import acceptance_summary
 from spade.analysis.plots import analyze_runs
+from spade.analysis.report import generate_experiment_report
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument("run_dirs",nargs="+",type=Path,help="One or more completed outputs/runs/<run_id> directories")
@@ -20,4 +21,5 @@ for root in a.run_dirs:
 summary=acceptance_summary([x for x in tokens if x.get("mode")=="B2"],[x for x in rounds if x.get("mode")=="B2"])
 (a.output_dir/"acceptance_summary.json").write_text(json.dumps(summary,indent=2)+"\n",encoding="utf-8")
 report=analyze_runs([str(x) for x in a.run_dirs],a.output_dir)
-print(json.dumps({"acceptance_summary":summary,"analysis":report},indent=2))
+exp_report=generate_experiment_report(a.run_dirs, a.output_dir)
+print(json.dumps({"acceptance_summary":summary,"analysis":report,"experiment_report":exp_report["report_version"]},indent=2))
