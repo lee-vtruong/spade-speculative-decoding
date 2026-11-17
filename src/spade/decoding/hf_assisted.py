@@ -18,6 +18,7 @@ from .cache_utils import CacheManager, crop_past_key_values, get_cache_seq_lengt
 from ..instrumentation.token_analysis import categorize_token, evidence_overlap
 from ..adaptive.evidence_indexer import EvidenceIndexer
 from ..adaptive.biasing import apply_evidence_bias, EvidenceBiasingConfig
+from ..adaptive.dynamic_k import DynamicKConfig, DynamicKController
 
 @dataclass
 class Generation:
@@ -67,8 +68,10 @@ class QwenPair:
                  temperature: float = 1.0, top_k: int = 0, top_p: float = 1.0, seed: int = 42,
                  run_id: str = "diagnostic", claim_id: str = "unknown",
                  evidence_texts: list[str] | None = None,
-                 cache_strategy: str = "recompute") -> Generation:
-        """Run B0/B0-S/B1/B2 with recompute or kv_cache strategy."""
+                 cache_strategy: str = "recompute",
+                 dynamic_k: bool = False,
+                 dynamic_k_config: DynamicKConfig | None = None) -> Generation:
+        """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4"}:
             raise ValueError(f"Unsupported mode {mode}")
         if mode in {"B1", "B2", "M4"} and self.draft is None:
@@ -98,7 +101,8 @@ class QwenPair:
                     draft_length=draft_length, temperature=temperature, top_k=top_k,
                     top_p=top_p, generator=generator, target_device=target_device,
                     target_eos=target_eos, run_id=run_id, claim_id=claim_id,
-                    evidence_texts=evidence_texts
+                    evidence_texts=evidence_texts, dynamic_k=dynamic_k,
+                    dynamic_k_config=dynamic_k_config
                 )
             except Exception:
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
@@ -109,14 +113,17 @@ class QwenPair:
             draft_length=draft_length, temperature=temperature, top_k=top_k,
             top_p=top_p, generator=generator, target_device=target_device,
             target_eos=target_eos, run_id=run_id, claim_id=claim_id,
-            evidence_texts=evidence_texts
+            evidence_texts=evidence_texts, dynamic_k=dynamic_k,
+            dynamic_k_config=dynamic_k_config
         )
 
     def _generate_recompute(self, prompt_ids: list[int], mode: str, max_new_tokens: int,
                             draft_length: int, temperature: float, top_k: int, top_p: float,
                             generator: torch.Generator, target_device: torch.device,
                             target_eos: int | None, run_id: str, claim_id: str,
-                            evidence_texts: list[str] | None) -> Generation:
+                            evidence_texts: list[str] | None,
+                            dynamic_k: bool = False,
+                            dynamic_k_config: DynamicKConfig | None = None) -> Generation:
         generated = []
         round_rows = []
         token_rows = []
@@ -125,6 +132,7 @@ class QwenPair:
         start = time.perf_counter()
         round_index = 0
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
+        dynamic_k_controller = DynamicKController(dynamic_k_config) if (mode == "M4" and dynamic_k) else None
 
         while len(generated) < max_new_tokens:
             prefix = prompt_ids + generated
@@ -152,18 +160,31 @@ class QwenPair:
                     token = sample_distribution(processed_distribution(logits, temperature, top_k, top_p), generator)
                 generated.append(token)
                 total_s = time.perf_counter() - rstart
-                round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prefix), "draft_length_requested": 0, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": total_s, "cumulative_generated_tokens": len(generated)})
+                round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prefix), "draft_length_requested": 0, "dynamic_k_reason": None, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": total_s, "cumulative_generated_tokens": len(generated)})
                 if token == target_eos:
                     break
                 round_index += 1
                 continue
 
             draft_device = self._input_device(self.draft)
-            count = min(draft_length, remaining)
-            d0 = time.perf_counter()
             draft_prefix = list(prefix)
-            for _ in range(count):
-                qlogits = self._logits(self.draft, draft_prefix, draft_device)
+            current_k = draft_length
+            dynamic_reason = None
+            first_qlogits = None
+
+            if dynamic_k_controller is not None:
+                first_qlogits = self._logits(self.draft, draft_prefix, draft_device)
+                current_k, dynamic_reason = dynamic_k_controller.determine_k(
+                    first_qlogits, evidence_indexer, draft_prefix
+                )
+
+            count = min(current_k, remaining)
+            d0 = time.perf_counter()
+            for step_idx in range(count):
+                if step_idx == 0 and first_qlogits is not None:
+                    qlogits = first_qlogits
+                else:
+                    qlogits = self._logits(self.draft, draft_prefix, draft_device)
                 if mode == "M4" and evidence_indexer is not None:
                     qlogits = apply_evidence_bias(qlogits, evidence_indexer, draft_prefix)
                 q = processed_distribution(qlogits, temperature, top_k, top_p)
@@ -261,7 +282,10 @@ class QwenPair:
                 extra_text = self.target_tokenizer.decode([extra])
                 token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + len(generated) - 1, "token_id": extra, "token_text": extra_text, "draft_probability": None, "target_probability": float(target_extra[extra].item()) if mode == "B2" else 1.0, "acceptance_probability": None, "total_variation": None, "expected_acceptance_probability": None, "status": "extra_target_token", "reached_by_verifier": False, "discarded_after_rejection": False, "replacement_token_id": None, "token_category": categorize_token(extra_text), "prefix_length": len(prompt_ids) + generation_start + len(proposed), "evidence_overlap": evidence_overlap(extra_text, evidence_texts or [])})
 
-            round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prefix), "draft_length_requested": draft_length, "proposed_token_count": len(proposed), "accepted_draft_tokens": accepted_draft, "rejection_position": rejection, "full_acceptance": rejection is None and accepted_draft == len(proposed), "additional_target_token": extra is not None, "committed_output_tokens": len(generated) - generated_before, "draft_latency_s": draft_s, "verification_latency_s": target_s, "correction_latency_s": correction_s, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
+            if dynamic_k_controller is not None:
+                dynamic_k_controller.update_history(accepted_draft, len(proposed))
+
+            round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prefix), "draft_length_requested": current_k, "dynamic_k_reason": dynamic_reason, "proposed_token_count": len(proposed), "accepted_draft_tokens": accepted_draft, "rejection_position": rejection, "full_acceptance": rejection is None and accepted_draft == len(proposed), "additional_target_token": extra is not None, "committed_output_tokens": len(generated) - generated_before, "draft_latency_s": draft_s, "verification_latency_s": target_s, "correction_latency_s": correction_s, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
 
             if generated and generated[-1] == target_eos:
                 break
@@ -275,7 +299,9 @@ class QwenPair:
                            draft_length: int, temperature: float, top_k: int, top_p: float,
                            generator: torch.Generator, target_device: torch.device,
                            target_eos: int | None, run_id: str, claim_id: str,
-                           evidence_texts: list[str] | None) -> Generation:
+                           evidence_texts: list[str] | None,
+                           dynamic_k: bool = False,
+                           dynamic_k_config: DynamicKConfig | None = None) -> Generation:
         """KV-cache accelerated generation with rollback on rejection."""
         generated = []
         round_rows = []
@@ -285,6 +311,7 @@ class QwenPair:
         target_cache_mgr = CacheManager()
         draft_cache_mgr = CacheManager()
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
+        dynamic_k_controller = DynamicKController(dynamic_k_config) if (mode == "M4" and dynamic_k) else None
 
         # Target prefill
         self._sync(target_device)
@@ -333,7 +360,7 @@ class QwenPair:
                 if token == target_eos or len(generated) >= max_new_tokens:
                     target_s = time.perf_counter() - t0
                     timings["target_verification_s"] += target_s
-                    round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + len(generated) - 1, "draft_length_requested": 0, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
+                    round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + len(generated) - 1, "draft_length_requested": 0, "dynamic_k_reason": None, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
                     break
                 step_inp = torch.tensor([[token]], dtype=torch.long, device=target_device)
                 with torch.inference_mode():
@@ -343,12 +370,19 @@ class QwenPair:
                 timings["target_verification_s"] += target_s
                 target_cache_mgr.update(step_out.past_key_values)
                 next_target_logits = step_out.logits[0, -1].float()
-                round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + len(generated) - 1, "draft_length_requested": 0, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
+                round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + len(generated) - 1, "draft_length_requested": 0, "dynamic_k_reason": None, "proposed_token_count": 0, "accepted_draft_tokens": 0, "rejection_position": None, "full_acceptance": False, "additional_target_token": False, "committed_output_tokens": 1, "draft_latency_s": 0.0, "verification_latency_s": target_s, "correction_latency_s": 0.0, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
                 round_index += 1
                 continue
 
-            # Speculative branch (B1 or B2) with KV-cache rollback
-            count = min(draft_length, remaining)
+            # Speculative branch (B1, B2, or M4) with KV-cache rollback
+            current_k = draft_length
+            dynamic_reason = None
+            if dynamic_k_controller is not None:
+                context_now = prompt_ids + generated
+                current_k, dynamic_reason = dynamic_k_controller.determine_k(
+                    next_draft_logits, evidence_indexer, context_now
+                )
+            count = min(current_k, remaining)
             proposed = []
             q_dists = []
             d0 = time.perf_counter()
@@ -462,7 +496,10 @@ class QwenPair:
                 extra_text = self.target_tokenizer.decode([extra])
                 token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + len(generated) - 1, "token_id": extra, "token_text": extra_text, "draft_probability": None, "target_probability": float(target_extra[extra].item()) if mode == "B2" else 1.0, "acceptance_probability": None, "total_variation": None, "expected_acceptance_probability": None, "status": "extra_target_token", "reached_by_verifier": False, "discarded_after_rejection": False, "replacement_token_id": None, "token_category": categorize_token(extra_text), "prefix_length": len(prompt_ids) + generation_start + len(proposed), "evidence_overlap": evidence_overlap(extra_text, evidence_texts or [])})
 
-            round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + generation_start, "draft_length_requested": draft_length, "proposed_token_count": len(proposed), "accepted_draft_tokens": accepted_draft, "rejection_position": rejection, "full_acceptance": rejection is None and accepted_draft == len(proposed), "additional_target_token": extra is not None, "committed_output_tokens": len(generated) - generated_before, "draft_latency_s": draft_s, "verification_latency_s": target_s, "correction_latency_s": correction_s, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
+            if dynamic_k_controller is not None:
+                dynamic_k_controller.update_history(accepted_draft, len(proposed))
+
+            round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + generation_start, "draft_length_requested": current_k, "dynamic_k_reason": dynamic_reason, "proposed_token_count": len(proposed), "accepted_draft_tokens": accepted_draft, "rejection_position": rejection, "full_acceptance": rejection is None and accepted_draft == len(proposed), "additional_target_token": extra is not None, "committed_output_tokens": len(generated) - generated_before, "draft_latency_s": draft_s, "verification_latency_s": target_s, "correction_latency_s": correction_s, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
 
             # Update next logits for the next round
             last_token = generated[-1]
