@@ -85,11 +85,9 @@ def main():
     print("\n[RUNNING] M3 Analysis over completed runs...")
     analysis_cmd = [
         python, "scripts/analyze_traces.py",
-        "--runs-dir", str(runs_dir),
+        *[str(r) for r in completed_runs],
         "--output-dir", str(a.output_dir),
     ]
-    for r in completed_runs:
-        analysis_cmd.extend(["--run-id", r.name])
     run_cmd(analysis_cmd)
 
     print(f"\n[DONE] Pilot suite finished successfully! Results saved to {a.output_dir}")
