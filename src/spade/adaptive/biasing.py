@@ -20,11 +20,9 @@ class EvidenceBiasingConfig:
     max_boost_cap: float = 3.0
 
 def compute_entropy(logits: torch.Tensor) -> float:
-    """Compute Shannon entropy (in nats) of the softmax distribution."""
-    probs = torch.softmax(logits, dim=-1)
-    log_probs = torch.log_softmax(logits, dim=-1)
-    entropy = -torch.sum(probs * log_probs).item()
-    return float(entropy)
+    """Compute Shannon entropy (in nats) of the softmax distribution via single-pass log_softmax."""
+    log_p = torch.log_softmax(logits, dim=-1)
+    return float((-torch.sum(torch.exp(log_p) * log_p)).item())
 
 def apply_evidence_bias(
     draft_logits: torch.Tensor,
@@ -64,7 +62,7 @@ def apply_evidence_bias(
     if candidates:
         order_factor = 1.0 + config.order_decay * (matched_order - 1)
         boost_val = min(config.max_boost_cap, config.boost_weight * order_factor * gating)
-        cand_tensor = torch.tensor(list(candidates), dtype=torch.long, device=draft_logits.device)
+        cand_tensor = torch.as_tensor(tuple(candidates), dtype=torch.long, device=draft_logits.device)
         biased_logits[cand_tensor] += boost_val
 
     return biased_logits

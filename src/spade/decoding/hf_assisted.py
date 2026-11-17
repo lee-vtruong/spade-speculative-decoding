@@ -341,6 +341,7 @@ class QwenPair:
             draft_device = target_device
             next_draft_logits = None
 
+        pending_target_token: int | None = None
         start = time.perf_counter()
         round_index = 0
 
@@ -412,9 +413,18 @@ class QwenPair:
             draft_s = time.perf_counter() - d0
             timings["draft_generation_s"] += draft_s
 
-            # Target model verifies all proposed tokens in a single forward pass
+            # Target model verifies proposed tokens in a single batched forward pass
+            # If pending_target_token is present from previous round (residual or bonus token),
+            # we prepend it so the target evaluates both pending and proposed tokens in ONE call.
             t0 = time.perf_counter()
-            vinp = torch.tensor([proposed], dtype=torch.long, device=target_device)
+            if pending_target_token is not None:
+                verify_tokens = [pending_target_token] + proposed
+                has_pending = True
+            else:
+                verify_tokens = proposed
+                has_pending = False
+
+            vinp = torch.tensor([verify_tokens], dtype=torch.long, device=target_device)
             with torch.inference_mode():
                 tout = self.target(input_ids=vinp, past_key_values=target_cache_mgr.past_key_values, use_cache=True)
             self._sync(target_device)
@@ -422,13 +432,15 @@ class QwenPair:
             timings["target_verification_s"] += target_s
             target_cache_mgr.update(tout.past_key_values)
 
-            # Target logits at position 0 comes from next_target_logits,
-            # position 1..len(proposed)-1 come from tout.logits[0, 0..count-2],
-            # extra target token logits comes from tout.logits[0, -1]
-            p_dists = [processed_distribution(next_target_logits, temperature, top_k, top_p)]
-            for i in range(len(proposed) - 1):
-                p_dists.append(processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p))
-            target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
+            # Target distributions:
+            if has_pending:
+                p_dists = [processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p) for i in range(len(proposed))]
+                target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
+            else:
+                p_dists = [processed_distribution(next_target_logits, temperature, top_k, top_p)]
+                for i in range(len(proposed) - 1):
+                    p_dists.append(processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p))
+                target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
 
             # Verification logic
             c0 = time.perf_counter()
@@ -449,8 +461,11 @@ class QwenPair:
                         break
                 if rejection is not None:
                     status = ["accepted"] * rejection + ["rejected"] + ["discarded_after_rejection"] * (len(proposed) - rejection - 1)
-                    # Rollback KV cache to keep only accepted proposed tokens
-                    target_cache_mgr.rollback(target_cache_len_before + rejection)
+                    # Rollback KV cache: if has_pending, keep pending token + accepted proposed tokens
+                    if has_pending:
+                        target_cache_mgr.rollback(target_cache_len_before + 1 + rejection)
+                    else:
+                        target_cache_mgr.rollback(target_cache_len_before + rejection)
                     draft_cache_mgr.rollback(draft_cache_len_before + rejection)
                 else:
                     status = ["accepted"] * len(accepted) + ["discarded_after_rejection"] * (len(proposed) - len(accepted))
@@ -468,8 +483,11 @@ class QwenPair:
                 extra = result.extra_target
                 accepted_draft = result.accepted
                 if rejection is not None:
-                    # Rollback target cache to position of rejection
-                    target_cache_mgr.rollback(target_cache_len_before + rejection)
+                    # Rollback KV cache: if has_pending, keep pending token + accepted proposed tokens
+                    if has_pending:
+                        target_cache_mgr.rollback(target_cache_len_before + 1 + rejection)
+                    else:
+                        target_cache_mgr.rollback(target_cache_len_before + rejection)
                     draft_cache_mgr.rollback(draft_cache_len_before + rejection)
                 if result.replacement is not None:
                     repl_text = self.target_tokenizer.decode([result.replacement])
@@ -506,16 +524,12 @@ class QwenPair:
             if last_token == target_eos:
                 break
 
-            # If rejection occurred or extra was sampled, last_token is newly committed
-            # and must be processed by target and draft to synchronize caches and produce next logits.
-            # If all proposed tokens were accepted without extra token (e.g. remaining budget),
-            # both caches already contain proposed[-1] and logits are already available.
+            # If rejection occurred or extra was sampled, last_token is newly committed.
+            # We defer target forward pass to the next verification batch (saving ~24ms!).
+            # Only the draft model runs 1 step on last_token to update its KV cache and emit next_draft_logits.
             if rejection is not None or extra is not None:
-                step_inp = torch.tensor([[last_token]], dtype=torch.long, device=target_device)
-                with torch.inference_mode():
-                    step_tout = self.target(input_ids=step_inp, past_key_values=target_cache_mgr.past_key_values, use_cache=True)
-                target_cache_mgr.update(step_tout.past_key_values)
-                next_target_logits = step_tout.logits[0, -1].float()
+                pending_target_token = last_token
+                next_target_logits = None
 
                 d_step_inp = torch.tensor([[last_token]], dtype=torch.long, device=draft_device)
                 with torch.inference_mode():
@@ -523,6 +537,7 @@ class QwenPair:
                 draft_cache_mgr.update(step_dout.past_key_values)
                 next_draft_logits = step_dout.logits[0, -1].float()
             else:
+                pending_target_token = None
                 next_target_logits = tout.logits[0, -1].float()
                 next_draft_logits = cur_draft_logits
 

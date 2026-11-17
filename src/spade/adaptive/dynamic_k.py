@@ -39,10 +39,9 @@ class DynamicKController:
         self.decision_history: list[dict] = []
 
     def compute_entropy(self, logits: torch.Tensor) -> float:
-        """Compute Shannon entropy in nats from unnormalized logits."""
-        probs = torch.softmax(logits, dim=-1)
-        log_probs = torch.log_softmax(logits, dim=-1)
-        return float(-torch.sum(probs * log_probs).item())
+        """Compute Shannon entropy in nats from unnormalized logits via single-pass log_softmax."""
+        log_p = torch.log_softmax(logits, dim=-1)
+        return float((-torch.sum(torch.exp(log_p) * log_p)).item())
 
     def update_history(self, accepted_tokens: int, proposed_tokens: int) -> None:
         """Record the outcome of the completed round to inform the next round."""
@@ -78,7 +77,7 @@ class DynamicKController:
             evidence_matched_order = matched_order
             if candidates and matched_order >= self.config.min_evidence_order:
                 probs = torch.softmax(draft_logits, dim=-1)
-                cand_tensor = torch.tensor(list(candidates), dtype=torch.long, device=draft_logits.device)
+                cand_tensor = torch.as_tensor(tuple(candidates), dtype=torch.long, device=draft_logits.device)
                 cand_mass = float(probs[cand_tensor].sum().item())
                 if cand_mass >= self.config.evidence_mass_threshold:
                     has_evidence_continuation = True
