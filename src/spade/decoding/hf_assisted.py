@@ -405,8 +405,8 @@ class QwenPair:
                         break
                 if rejection is not None:
                     status = ["accepted"] * rejection + ["rejected"] + ["discarded_after_rejection"] * (len(proposed) - rejection - 1)
-                    # Rollback KV cache
-                    target_cache_mgr.rollback(target_cache_len_before + rejection + 1)
+                    # Rollback KV cache to keep only accepted proposed tokens
+                    target_cache_mgr.rollback(target_cache_len_before + rejection)
                     draft_cache_mgr.rollback(draft_cache_len_before + rejection)
                 else:
                     status = ["accepted"] * len(accepted) + ["discarded_after_rejection"] * (len(proposed) - len(accepted))
@@ -458,18 +458,26 @@ class QwenPair:
             last_token = generated[-1]
             if last_token == target_eos:
                 break
-            # Step target and draft to sync caches on the final committed token
-            step_inp = torch.tensor([[last_token]], dtype=torch.long, device=target_device)
-            with torch.inference_mode():
-                step_tout = self.target(input_ids=step_inp, past_key_values=target_cache_mgr.past_key_values, use_cache=True)
-            target_cache_mgr.update(step_tout.past_key_values)
-            next_target_logits = step_tout.logits[0, -1].float()
 
-            d_step_inp = torch.tensor([[last_token]], dtype=torch.long, device=draft_device)
-            with torch.inference_mode():
-                step_dout = self.draft(input_ids=d_step_inp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
-            draft_cache_mgr.update(step_dout.past_key_values)
-            next_draft_logits = step_dout.logits[0, -1].float()
+            # If rejection occurred or extra was sampled, last_token is newly committed
+            # and must be processed by target and draft to synchronize caches and produce next logits.
+            # If all proposed tokens were accepted without extra token (e.g. remaining budget),
+            # both caches already contain proposed[-1] and logits are already available.
+            if rejection is not None or extra is not None:
+                step_inp = torch.tensor([[last_token]], dtype=torch.long, device=target_device)
+                with torch.inference_mode():
+                    step_tout = self.target(input_ids=step_inp, past_key_values=target_cache_mgr.past_key_values, use_cache=True)
+                target_cache_mgr.update(step_tout.past_key_values)
+                next_target_logits = step_tout.logits[0, -1].float()
+
+                d_step_inp = torch.tensor([[last_token]], dtype=torch.long, device=draft_device)
+                with torch.inference_mode():
+                    step_dout = self.draft(input_ids=d_step_inp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
+                draft_cache_mgr.update(step_dout.past_key_values)
+                next_draft_logits = step_dout.logits[0, -1].float()
+            else:
+                next_target_logits = tout.logits[0, -1].float()
+                next_draft_logits = cur_draft_logits
 
             round_index += 1
 
