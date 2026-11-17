@@ -197,6 +197,8 @@ $$\alpha_{\text{eval}} = \frac{1509 + 5243}{2287 + 7349} = \frac{6752}{9636} = 7
 
 As shown in Table 2, SPADE lifts evidence-overlapping token acceptance from 65.98% to **67.05% (+1.07% absolute)**, directly demonstrating that dynamic entropy-gated biasing steers the draft model toward factual agreement with the target on challenging evidence spans.
 
+To test whether these improvements are statistically significant, we conducted paired cluster bootstrap resampling ($B=10,000$ iterations) clustered by claim over the 100 benchmark examples. For overall evaluated acceptance ($\alpha_{\text{eval}}$), SPADE achieves an absolute improvement of $+0.87\%$ with a 95% confidence interval of $[+0.02\%, +1.78\%]$ ($p = 0.0227$, one-tailed), confirming statistical significance at the $\alpha = 0.05$ level. For the evidence-overlapping subset, the observed $+1.07\%$ gain yields a 95% bootstrap confidence interval of $[-0.45\%, +2.78\%]$ (standard error $0.82\%$, one-tailed $p = 0.0923$). While marginally significant ($p < 0.10$), the interval crosses zero, indicating that while evidence biasing provides a consistent positive directional lift, establishing definitive statistical significance on the evidence-specific subset strictly requires scaling the evaluation corpus beyond 100 claims.
+
 ### 6.3. Dynamic Speculative Horizon Dynamics
 
 | Metric | Fixed $K=6$ | Dynamic $K(t)$ | Delta |
