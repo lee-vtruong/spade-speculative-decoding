@@ -199,24 +199,26 @@ $$\alpha_{\text{eval}} = \frac{1509 + 5243}{2287 + 7349} = \frac{6752}{9636} = 7
 
 As shown in Table 2, SPADE lifts evidence-overlapping token acceptance from 65.98% to **67.05% (+1.07% absolute)**, directly demonstrating that dynamic entropy-gated biasing steers the draft model toward factual agreement with the target on challenging evidence spans.
 
-To test whether these improvements are statistically significant, we conducted paired cluster bootstrap resampling ($B=10,000$ iterations) clustered by claim over the 100 benchmark examples. For overall evaluated acceptance ($\alpha_{\text{eval}}$), SPADE achieves an absolute improvement of $+0.87\%$ with a 95% confidence interval of $[+0.02\%, +1.78\%]$ ($p = 0.0227$, one-tailed), confirming statistical significance at the $\alpha = 0.05$ level. For the evidence-overlapping subset, the observed $+1.07\%$ gain yields a 95% bootstrap confidence interval of $[-0.45\%, +2.78\%]$ (standard error $0.82\%$, one-tailed $p = 0.0923$). While marginally significant ($p < 0.10$), the interval crosses zero, indicating that while evidence biasing provides a consistent positive directional lift, establishing definitive statistical significance on the evidence-specific subset strictly requires scaling the evaluation corpus beyond 100 claims.
+To test whether these improvements are statistically significant, we conducted paired cluster bootstrap resampling ($B=10,000$ iterations) clustered by claim over the 100 benchmark examples. Specifically, in each bootstrap replication, we resampled claim clusters with replacement and evaluated the paired difference $\Delta = \alpha_{\text{SPADE}} - \alpha_{\text{B2}}$ on the identical sampled claim set. For overall evaluated acceptance ($\alpha_{\text{eval}}$), SPADE achieves an absolute improvement of $+0.87\%$ with a 95% confidence interval of $[+0.02\%, +1.78\%]$ ($p = 0.0227$, one-tailed), confirming statistical significance at the conventional $\alpha = 0.05$ level. For the evidence-overlapping subset, the observed $+1.07\%$ gain yields a 95% bootstrap confidence interval of $[-0.45\%, +2.78\%]$ (standard error $0.82\%$, one-tailed $p = 0.0923$). While marginally significant ($p < 0.10$), the interval crosses zero. We candidly note that because individual claims exhibit substantial variance in evidence density and passage length, establishing definitive statistical significance ($p < 0.05$) on the evidence-specific subset strictly requires expanding the evaluation benchmark beyond 100 claims ($N \ge 250$).
 
 ### 6.3. Dynamic Speculative Horizon Dynamics
 
 | Metric | Fixed $K=6$ | Dynamic $K(t)$ | Delta |
 | :--- | :---: | :---: | :---: |
+| Committed Tokens | 9,263 | 9,115 | -1.6% |
 | Target Rounds | 2,334 | **2,311** | **-23 rounds** |
 | Acceptance Rate $\alpha_{\text{prop}}$ | 50.99% | **55.62%** | **+4.63%** |
-| Total Proposals | 13,774 | **12,398** | **-1,376 wasted** |
+| Total Proposals | 13,774 | **12,398** | -1,376 |
+| Proposals / Comm. Token | 1.487 | **1.360** | **-8.53%** |
 | Decode Latency | 4.990s | **4.679s** | **-6.2% latency** |
 
-*Table 3: Impact of Dynamic Horizon $K(t) \in \{2, 4, 6\}$: Dynamic scheduling reduces compute waste while achieving the lowest target verification count.*
+*Table 3: Impact of Dynamic Horizon $K(t) \in \{2, 4, 6\}$: Dynamic scheduling reduces normalized proposal overhead per committed token while achieving the lowest target verification count.*
 
-Table 3 compares fixed-horizon speculation at $K=6$ against SPADE's dynamic horizon controller. While fixed $K=6$ generates 13,774 draft proposals, dynamic $K(t)$ requires only 12,398 proposals to generate the same benchmark texts, **eliminating 1,376 wasted draft proposals**. Consequently, SPADE boosts average token acceptance by **+4.63%** (from 50.99% to 55.62%) and reduces decode latency by 6.2%. 
+Table 3 compares fixed-horizon speculation at $K=6$ against SPADE's dynamic horizon controller. Because stochastic sampling introduces natural variance in termination lengths across runs (9,263 vs 9,115 total tokens), raw proposal counts must be normalized per committed token for a fair comparison. Fixed $K=6$ generates 1.487 draft proposals per committed token ($13,774 / 9,263$), whereas dynamic $K(t)$ requires only 1.360 proposals per committed token ($12,398 / 9,115$). This constitutes an **8.53% reduction in draft proposal overhead per committed token**, driven directly by the controller throttling horizon during high-divergence boundaries. Consequently, SPADE boosts average token acceptance by **+4.63%** (from 50.99% to 55.62%) and reduces decode latency by 6.2%. 
 
 Analysis of the controller's decisions across all 2,311 rounds reveals that $K=6$ was chosen in 83.8% of rounds during high-confidence stretches, whereas $K=2$ was triggered in 10.8% of rounds following early rejections, successfully curtailing speculative waste during difficult semantic boundaries.
 
-### 6.4. Downstream Task Accuracy and Factuality
+### 6.4. Downstream Task Veracity and Structural Adherence
 
 | Evaluation Dimension | Metric | Measured Value |
 | :--- | :--- | :---: |
@@ -225,9 +227,9 @@ Analysis of the controller's decisions across all 2,311 rounds reveals that $K=6
 | **Structural Adherence** | JSON Parse Success Rate | 100.0% |
 | | Citation ID Validity | 100.0% (211 / 211) |
 
-*Table 4: Downstream Task Performance on AVeriTeC Benchmark: Fact-checking veracity classification and structured generation metrics across 100 evaluated claims.*
+*Table 4: Task Veracity Accuracy and Structural Adherence on AVeriTeC Benchmark: Downstream veracity classification and structured generation metrics across 100 evaluated claims.*
 
-Table 4 presents the downstream task performance on the AVeriTeC benchmark. Under identical random seeds, exact speculative sampling strictly preserves the target model's output distribution (Theorem 1), producing bitwise identical veracity verdicts (60.0% accuracy, 0.3416 macro-F1) and identical factual summaries to standard autoregressive decoding. Crucially, all 100 outputs achieved 100.0% valid JSON formatting and 100.0% citation ID correctness (all 211 generated citation markers correctly referenced valid evidence identifiers from the prompt).
+Table 4 presents downstream task veracity classification and schema validity on the AVeriTeC benchmark across 100 evaluated claims. Under exact speculative sampling, the target output distribution is mathematically preserved (Theorem 1). Empirically, downstream veracity classification matches target autoregressive performance (60.0% accuracy, 0.3416 macro-F1 across all 4 classes). We clarify that while Theorem 1 guarantees exact distributional equivalence ($\Pr(Y=y) = p(y)$), exact speculative sampling draws auxiliary random variables $r_k \sim \mathcal{U}[0, 1]$ during acceptance checks and samples from the residual distribution $p_{res}$ upon rejection; thus, stochastic speculative sampling and autoregressive decoding consume different pseudo-random sequences and yield statistically equivalent sample paths rather than bitwise identical strings across seeds. Crucially, all 100 generated responses achieved 100.0% valid JSON formatting and 100.0% citation ID correctness (all 211 generated citation markers correctly referenced valid evidence identifiers from the prompt). We note that this evaluation assesses categorical veracity classification and structural schema compliance; full multi-sentence factual entailment scoring (e.g., via NLI or AlignScore) remains an important complementary avenue for future work.
 
 ### 6.5. Token-Level Diagnostic Profiling
 
