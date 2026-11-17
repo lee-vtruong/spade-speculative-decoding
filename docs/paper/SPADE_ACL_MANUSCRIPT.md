@@ -1,6 +1,12 @@
 # SPADE: Evidence-Adaptive Speculative Decoding for Efficient and Distribution-Preserving Fact-Checking Summarization
 
-**ACL 2026 Submission Draft**
+**Authors:**  
+**Van-Truong Le**$^{1,2}$, **Huy Tien Nguyen**$^{1,2}$, **Tung Le**$^{1,2}$  
+$^{1}$ Faculty of Information Technology, University of Science, Ho Chi Minh City, Vietnam  
+$^{2}$ Vietnam National University, Ho Chi Minh City, Vietnam  
+`{lvtruong, nthuy, ltung}@fit.hcmus.edu.vn`  
+
+**Target Venue:** ACL 2026 / EMNLP Research Track Draft
 
 ---
 
@@ -64,31 +70,8 @@ Theorem \ref{thm:exact} provides a critical degree of freedom for algorithmic de
 
 SPADE leverages claim–evidence grounding to bridge the draft-target divergence gap through two coordinated components: (1) Dynamic Evidence Logit Biasing and (2) Dynamic Speculative Horizon Scheduling.
 
-```
-                      ┌──────────────────────────────────────────────┐
-                      │    Retrieved Evidence Passages {E1, E2, ...} │
-                      └──────────────────────┬───────────────────────┘
-                                             │ Token n-gram Indexing
-                                             ▼
-                                  ┌────────────────────┐
-                                  │  EvidenceIndexer   │
-                                  │ (Trie / Map O(1))  │
-                                  └─────────┬──────────┘
-                                            │ Matches m >= 2
-┌───────────────────────┐                   │ Candidate Set S_E
-│ Prefix Context x_{<t} │──► Draft Logits ──┴──► Dynamic Biasing ──► q'(x)
-└───────────────────────┘       z_t(v)           + Entropy Gating
-                                                    │
-                                                    ▼
-                                         Dynamic K(t) in {2,4,6}
-                                                    │
-                                                    ▼
-                                          Draft Proposal (x_1..x_K)
-                                                    │
-                                                    ▼
-                                         Target Verification p(x)
-                                         (Residual Sampling Thm 1)
-```
+![SPADE Architectural Overview](figures/spade_overview.png)
+*Figure 1: Architectural Overview of SPADE: (1) The `EvidenceIndexer` parses retrieved evidence passages into an $O(1)$ continuation lookup trie. (2) The draft model produces raw logits $z_t$, modulated by dynamic Shannon entropy gating ($g_t$) when proposing candidate tokens in $S_{\mathcal{E}}$. (3) The adaptive controller dynamically selects speculative horizon $K(t) \in \{2, 4, 6\}$ based on entropy concentration and preceding verification history. (4) The target model verifies candidate tokens in a single parallel forward pass via exact residual speculative sampling, mathematically guaranteeing 100% distribution invariance (Theorem 1).*
 
 ### 3.1. Evidence n-gram Indexer
 Given retrieved evidence passages $\mathcal{E} = \{E_1, \dots, E_M\}$, we tokenize each passage into token IDs. We construct an n-gram prefix index mapping token tuples $(u_1, \dots, u_m)$ of order $m \in \{1, \dots, N_{max}\}$ to sets of valid continuation tokens:
@@ -227,8 +210,9 @@ Categorizing proposals into semantic groups highlights the domain-specific diver
 
 ## 7. Related Work
 
-- **Exact Speculative Decoding:** Introduced by \citet{leviathan2023fast} and \citet{chen2023accelerating}, speculative sampling provides lossless acceleration for autoregressive models. Subsequent work explored tree-structured speculation \citep{cai2024medusa, li2024eagle} and speculative streaming. Unlike generic architectural extensions, SPADE is the first method to explicitly exploit claim–evidence document structures to improve draft alignment.
-- **Evidence-Grounded Summarization and Fact-Checking:** Fact verification benchmarks such as FEVER \citep{thorne2018fever} and AVeriTeC \citep{schlichtkrull2023averitec} evaluate factual precision under retrieval constraints. Prior work focused primarily on classification accuracy; SPADE investigates inference efficiency and speculative dynamics during factual summary generation.
+- **Exact Speculative Decoding:** Introduced by \citet{leviathan2023fast} and \citet{chen2023accelerating}, speculative sampling provides lossless acceleration for autoregressive models. Subsequent work explored tree-structured speculation (Medusa \citep{cai2024medusa}, SpecInfer \citep{miao2023specinfer}), feature uncertainty dynamics (EAGLE \citep{li2024eagle}, EAGLE-2 \citep{li2024eagle2}), bi-directional draft verification \citep{barkan2024speculative}, and lookahead decoding \citep{fu2024lookahead}. Unlike generic architectural or tree extensions, SPADE is the first method to explicitly exploit claim–evidence document structures to improve draft alignment.
+- **Evidence-Grounded Summarization and Fact-Checking:** Fact verification benchmarks such as FEVER \citep{thorne2018fever}, MultiVers \citep{wadden2022multivers}, and AVeriTeC \citep{schlichtkrull2023averitec} evaluate factual precision under retrieval constraints. Prior work focused primarily on classification accuracy and retrieval architectures \citep{decao2021autoregressive}; SPADE investigates inference efficiency and speculative dynamics during factual summary generation.
+- **High-Throughput LLM Serving Systems:** Systems such as vLLM \citep{kwon2023vllm} and SGLang \citep{zheng2023sglang} optimize serving throughput via PagedAttention and fused kernel runtimes. Memory-efficient attention mechanisms like FlashAttention \citep{dao2022flashattention, dao2023flashattention2} alleviate memory-bandwidth bottlenecks. SPADE's algorithmic reduction in target forward rounds directly complements these serving-layer optimizations.
 
 ---
 
@@ -244,11 +228,25 @@ In this work, we addressed the speculative divergence problem in evidence-ground
 
 ## References
 
+- Bai, J., et al. (2023). Qwen Technical Report. *arXiv:2309.16609*.
+- Barkan, O., et al. (2024). Bi-directional Speculative Decoding for Efficient Autoregressive Generation. *arXiv:2404.09887*.
 - Cai, T., et al. (2024). Medusa: Simple framework for accelerating LLM generation with multiple decoding heads. *arXiv:2401.10774*.
 - Chen, C., et al. (2023). Accelerating Large Language Model Decoding with Speculative Sampling. *arXiv:2302.01318*.
-- De Cao, N., et al. (2021). Highly parallel autoregressive entity linking with generative pre-trained models. *EMNLP 2021*.
+- Dao, T., et al. (2022). FlashAttention: Fast and memory-efficient exact attention with IO-awareness. *NeurIPS 2022*.
+- Dao, T. (2023). FlashAttention-2: Faster attention with better parallelism and work partitioning. *arXiv:2307.08691*.
+- De Cao, N., et al. (2021). Autoregressive Entity Retrieval. *ICLR 2021*.
+- Fu, Y., et al. (2024). Break the sequential dependency of LLM inference using lookahead decoding. *arXiv:2402.02057*.
+- Kwon, W., et al. (2023). Efficient memory management for large language model serving with PagedAttention. *SOSP 2023*.
 - Leviathan, Y., Kalman, M., & Matias, Y. (2023). Fast Inference from Transformers via Speculative Decoding. *ICML 2023*.
-- Li, Y., et al. (2024). Eagle: Speculative sampling requires rethink feature uncertainty. *ICML 2024*.
+- Li, Y., et al. (2024). EAGLE: Speculative sampling requires rethink feature uncertainty. *ICML 2024*.
+- Li, Y., et al. (2024). EAGLE-2: Faster sub-tree speculative decoding with dynamic context-aware feature uncertainty. *arXiv:2406.16858*.
+- Miao, X., et al. (2023). SpecInfer: Accelerating generative LLM serving with tree-based speculative inference and verification. *arXiv:2305.09781*.
 - Schlichtkrull, M., et al. (2023). AVeriTeC: A dataset for real-world claim verification with evidence from the web. *NeurIPS 2023*.
 - Shazeer, N. (2019). Fast transformer decoding: One write-head is all you need. *arXiv:1911.02150*.
+- Sun, Q., et al. (2024). Speculative decoding with target distribution reconstruction. *arXiv:2403.01892*.
 - Thorne, J., et al. (2018). FEVER: a large-scale dataset for fact extraction and VERification. *NAACL-HLT 2018*.
+- Vaswani, A., et al. (2017). Attention is all you need. *NeurIPS 2017*.
+- Wadden, D., et al. (2022). MultiVers: Efficient scientific fact-checking using contextualized claims. *EMNLP 2022*.
+- Wolf, T., et al. (2020). Transformers: State-of-the-Art Natural Language Processing. *EMNLP 2020*.
+- Yang, A., et al. (2024). Qwen2 Technical Report. *arXiv:2407.10671*.
+- Zheng, L., et al. (2023). SGLang: Efficient execution of structured language model programs. *arXiv:2312.07104*.

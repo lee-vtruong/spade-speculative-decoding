@@ -12,6 +12,7 @@
 \usepackage{algpseudocode}
 \usepackage{microtype}
 \usepackage{xcolor}
+\usepackage{natbib}
 \usepackage{hyperref}
 \usepackage{cleveref}
 
@@ -22,6 +23,39 @@
     urlcolor=blue
 }
 
+% Author and Institute compatibility macros for LNCS / Conference templates
+\makeatletter
+\newcommand{\inst}[1]{\unskip$^{#1}$}
+\newcommand{\authorrunning}[1]{\gdef\@authorrunning{#1}}
+\newcommand{\institute}[1]{\gdef\@institute{#1}}
+\gdef\@institute{}
+\def\@maketitle{%
+  \newpage
+  \null
+  \vskip 2em%
+  \begin{center}%
+  \let \footnote \thanks
+    {\LARGE \bfseries \@title \par}%
+    \vskip 1.5em%
+    {\large
+      \lineskip .5em%
+      \begin{tabular}[t]{c}%
+        \@author
+      \end{tabular}\par}%
+    \ifx\@institute\@empty\else
+      \vskip 1.2em%
+      {\normalsize
+        \begin{tabular}[t]{c}%
+          \@institute
+        \end{tabular}\par}%
+    \fi
+    \vskip 1em%
+    {\large \@date}%
+  \end{center}%
+  \par
+  \vskip 1.5em}
+\makeatother
+
 \theoremstyle{plain}
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}{Lemma}
@@ -29,11 +63,10 @@
 
 \title{\textbf{SPADE: Evidence-Adaptive Speculative Decoding for Efficient and Distribution-Preserving Fact-Checking Summarization}}
 
-\author{
-  \textbf{SPADE Research Team} \\
-  Department of Computer Science \\
-  \texttt{research@spade-decoding.org}
-}
+\author{Van-Truong Le\inst{1,2} \and Huy Tien Nguyen\inst{1,2} \and Tung Le\inst{1,2}}
+\authorrunning{V.-T. Le et al.}
+\institute{Faculty of Information Technology, University of Science, Ho Chi Minh City, Vietnam
+\and Vietnam National University, Ho Chi Minh City, Vietnam}
 
 \date{}
 
@@ -117,7 +150,14 @@ Theorem \ref{thm:leviathan} establishes that modifying the draft distribution $q
 \section{Methodology: SPADE}
 \label{sec:method}
 
-SPADE exploits claim–evidence document structure to address draft divergence through two coordinated mechanisms: (1) Dynamic Entropy-Gated Draft Biasing, and (2) Dynamic Speculative Horizon Scheduling.
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/spade_overview.png}
+\caption{\textbf{Architectural Overview of SPADE:} (1) The \texttt{EvidenceIndexer} parses retrieved evidence passages into an $O(1)$ continuation lookup trie. (2) The draft model produces raw logits $z_t$, modulated by dynamic Shannon entropy gating ($g_t$) when proposing candidate tokens in $S_{\mathcal{E}}$. (3) The adaptive controller dynamically selects speculative horizon $K(t) \in \{2, 4, 6\}$ based on entropy concentration and preceding verification history. (4) The target model verifies all candidate tokens in a single parallel forward pass via exact residual speculative sampling, mathematically guaranteeing 100\% distribution invariance (Theorem \ref{thm:leviathan}).}
+\label{fig:spade_overview}
+\end{figure*}
+
+SPADE exploits claim–evidence document structure to address draft divergence through two coordinated mechanisms: (1) Dynamic Entropy-Gated Draft Biasing, and (2) Dynamic Speculative Horizon Scheduling. Figure \ref{fig:spade_overview} provides a systemic overview.
 
 \subsection{Evidence $n$-gram Indexer}
 Given retrieved evidence passages $\mathcal{E}$, we tokenize each passage into token sequences. We construct an $n$-gram prefix index $\mathcal{I}$ mapping token tuples $(u_1, \dots, u_m)$ of order $m \in \{1, \dots, N_{max}\}$ to sets of valid continuation tokens:
@@ -230,6 +270,7 @@ To prevent data leakage, ground-truth labels and human justifications are strict
 \begin{table*}[t]
 \centering
 \small
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{llcccccccc}
 \toprule
 \textbf{Configuration} & \textbf{Method} & \textbf{Draft $K$} & \textbf{Output Tok.} & \textbf{JSON \%} & \textbf{Citations \%} & \textbf{Throughput} & \textbf{Accept. $\alpha$} & \textbf{Acc/Rnd} & \textbf{Target Rounds} \\
@@ -246,7 +287,8 @@ To prevent data leakage, ground-truth labels and human justifications are strict
 \texttt{full-m4-k6-lim100} & SPADE (Fixed) & 6 & 92.63 & 100.0\% & 100.0\% & 18.56 tok/s & 50.99\% & 3.01 & 2,334 \\
 \texttt{full-m4-dyn-lim100} & \textbf{SPADE (Dynamic)} & \textbf{Dyn} $\{2,4,6\}$ & 91.15 & 100.0\% & 100.0\% & 19.48 tok/s & \textbf{55.62\%} & \textbf{2.98} & \textbf{2,311} \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \caption{\textbf{Main Benchmark Matrix (100 Claims on AVeriTeC):} Comparison of autoregressive baselines (B0, B0-S), exact speculative baselines (B1, B2), and SPADE. Target model: \texttt{Qwen3-8B}; Draft model: \texttt{Qwen3-0.6B} on NVIDIA RTX 5090 GPU.}
 \label{tab:main_results}
 \end{table*}
@@ -349,9 +391,11 @@ In PyTorch eager execution, draft generation incurs $K$ sequential Python/CUDA k
 \section{Related Work}
 \label{sec:related}
 
-\textbf{Exact Speculative Decoding:} Speculative sampling was established by \citet{leviathan2023fast} and \citet{chen2023accelerating} as a lossless acceleration technique for transformer inference. Subsequent investigations introduced multiple decoding heads (Medusa, \citealt{cai2024medusa}), feature uncertainty rethinking (EAGLE, \citealt{li2024eagle}), and non-autoregressive draft variants. Unlike prior architectural modifications, SPADE is the first method to leverage document evidence structures to dynamically guide draft sampling.
+\textbf{Exact Speculative Decoding:} Speculative sampling was established by \citet{leviathan2023fast} and \citet{chen2023accelerating} as a lossless acceleration technique for transformer inference. Subsequent investigations extended the paradigm to multiple decoding heads (Medusa, \citealt{cai2024medusa}), feature uncertainty exploration (EAGLE, \citealt{li2024eagle}; EAGLE-2, \citealt{li2024eagle2}), bi-directional draft verification \cite{barkan2024speculative}, lookahead decoding \cite{fu2024lookahead}, and tree-based verification pipelines (SpecInfer, \citealt{miao2023specinfer}; \citealt{sun2024spectr}). Unlike prior purely architectural or token-tree extensions, SPADE is the first method to explicitly leverage external document evidence structures to dynamically guide draft sampling and schedule speculative horizons.
 
-\textbf{Fact-Checking Summarization:} Fact verification benchmarks such as FEVER \cite{thorne2018fever} and AVeriTeC \cite{schlichtkrull2023averitec} evaluate claim veracity against web evidence. While prior research focused on classification accuracy and retrieval architectures \cite{decao2021autoregressive}, SPADE provides the first systematic study of speculative decoding dynamics during evidence-grounded summary generation.
+\textbf{Fact-Checking Summarization \& Grounding:} Fact verification benchmarks such as FEVER \cite{thorne2018fever}, MultiVers \cite{wadden2022multivers}, and AVeriTeC \cite{schlichtkrull2023averitec} evaluate claim veracity against large-scale web and scientific evidence corpora. While prior research focused on classification accuracy and retrieval architectures \cite{decao2021autoregressive}, SPADE provides the first systematic study of speculative decoding dynamics during evidence-grounded summary generation.
+
+\textbf{Efficient LLM Serving Engines:} High-throughput inference systems such as vLLM \cite{kwon2023vllm} and SGLang \cite{zheng2023sglang} optimize memory access via PagedAttention and fused kernel execution. Complementary attention kernel optimizations like FlashAttention \cite{dao2022flashattention,dao2023flashattention2} further reduce attention computation overhead. SPADE's algorithmic reduction in target verification rounds directly synergizes with these hardware-optimized serving backends.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -364,7 +408,7 @@ In this paper, we introduced SPADE, an evidence-adaptive speculative decoding fr
     \item \textbf{Evidence Retrieval Modality:} Our pilot evaluation employed oracle evidence pairs from AVeriTeC. Future work will investigate end-to-end dense retrieval integration.
 \end{enumerate}
 
-\bibliographystyle{plain}
+\bibliographystyle{plainnat}
 \bibliography{custom}
 
 \end{document}

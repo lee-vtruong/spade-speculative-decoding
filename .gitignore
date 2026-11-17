@@ -26,3 +26,11 @@ huggingface/
 *.qdrep
 *.log
 *.tmp
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.out
