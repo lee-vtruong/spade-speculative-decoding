@@ -18,7 +18,7 @@ def write_json(path: Path, value): path.write_text(json.dumps(value,ensure_ascii
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--mode",choices=["B0","B0-S","B1","B2","M4"],required=True)
+    p.add_argument("--mode",choices=["B0","B0-S","B1","B2","M4","HF","HF-Assisted"],required=True)
     p.add_argument("--input",type=Path,required=True,help="Prepared benchmark JSONL")
     p.add_argument("--output-root",type=Path,default=Path(os.environ.get("OUTPUT_ROOT","outputs/runs")))
     p.add_argument("--run-id",default=None)
@@ -28,7 +28,7 @@ def main():
     p.add_argument("--max-new-tokens",type=int,default=256)
     p.add_argument("--temperature",type=float,default=1.0); p.add_argument("--top-k",type=int,default=0); p.add_argument("--top-p",type=float,default=1.0)
     p.add_argument("--seed",type=int,default=42); p.add_argument("--limit",type=int,default=None)
-    p.add_argument("--warmup",type=int,default=0); p.add_argument("--trials",type=int,default=1)
+    p.add_argument("--warmup",type=int,default=0); p.add_argument("--global-warmup",type=int,default=0); p.add_argument("--trials",type=int,default=1)
     p.add_argument("--cache-strategy",choices=["recompute","kv_cache"],default="recompute",help="Inference cache strategy: recompute (default) or kv_cache")
     p.add_argument("--dynamic-k",action="store_true",default=False,help="Enable dynamic draft length adaptation K(t) in {2, 4, 6} for M4")
     p.add_argument("--no-entropy-gating",action="store_true",default=False,help="Disable entropy gating in M4 draft biasing (ablation)")
@@ -51,12 +51,15 @@ def main():
         from spade.instrumentation.trace_writer import TraceWriter
     except ImportError as exc: raise SystemExit(f"Required runtime dependency missing: {exc}") from exc
     pair=QwenPair(a.target,None if a.mode in {"B0","B0-S"} else a.draft,local_files_only=True,dtype=a.dtype)
-    is_kv = (a.cache_strategy == "kv_cache")
+    is_kv = (a.cache_strategy == "kv_cache") or (a.mode in {"HF", "HF-Assisted"})
     biasing_cfg = EvidenceBiasingConfig(adaptive_entropy=not a.no_entropy_gating) if a.mode == "M4" else None
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"no_entropy_gating":a.no_entropy_gating,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"no_entropy_gating":a.no_entropy_gating,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
-    env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None}
-    try: env["git_commit"]=subprocess.check_output(["git","rev-parse","HEAD"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
+    env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None,"git_dirty":None}
+    try:
+        env["git_commit"]=subprocess.check_output(["git","rev-parse","HEAD"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
+        porcelain=subprocess.check_output(["git","status","--porcelain"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
+        env["git_dirty"]=bool(porcelain)
     except Exception: pass
     if torch.cuda.is_available():
         env["gpu"]=[{"name":torch.cuda.get_device_name(i),"memory_bytes":torch.cuda.get_device_properties(i).total_memory} for i in range(torch.cuda.device_count())]
@@ -64,9 +67,17 @@ def main():
     write_json(out/"environment.json",env)
     writer=TraceWriter(out/"round_traces.jsonl",out/"token_traces.jsonl")
     canonical=[]; trial_rows=[]
+    common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg}
+    if a.global_warmup > 0:
+        wrow = rows[0]
+        wev = [e.get("text","") for e in wrow.get("evidence",[])]
+        for gw in range(a.global_warmup):
+            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
     with (out/"predictions.jsonl").open("x",encoding="utf-8") as prediction_file, (out/"trial_metrics.jsonl").open("x",encoding="utf-8") as trial_file:
         for index,row in enumerate(rows):
-            common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg}
             for warm in range(a.warmup):
                 pair.generate(row["prompt"],**common,seed=a.seed+index,run_id=f"{run_id}-warmup{warm}",claim_id=str(row["claim_id"]))
             evidence_texts=[e.get("text","") for e in row.get("evidence",[])]
@@ -89,11 +100,11 @@ def main():
         env["gpu_peak_allocated_bytes"]=[torch.cuda.max_memory_allocated(i) for i in range(torch.cuda.device_count())]
         env["gpu_peak_reserved_bytes"]=[torch.cuda.max_memory_reserved(i) for i in range(torch.cuda.device_count())]
         write_json(out/"environment.json",env)
-    metric={"run_id":run_id,"examples":len(canonical),"trials_per_example":a.trials,"warmups_per_example":a.warmup,
+    metric={"run_id":run_id,"examples":len(canonical),"trials_per_example":a.trials,"warmups_per_example":a.warmup,"global_warmup":a.global_warmup,
             "json_parse_success_rate":sum(x["parse_success"] for x in canonical)/len(canonical),
             "citation_id_validity_rate":sum(x["citation_id_validity"] for x in canonical)/len(canonical),
             "mean_output_tokens":statistics.mean(x["output_tokens"] for x in canonical),"mean_decode_s_per_trial":statistics.mean(x["decode_s"] for x in trial_rows),
-            "timings_authoritative":False,"factuality":"not_evaluated"}
+            "timings_authoritative":is_kv,"factuality":"not_evaluated"}
     write_json(out/"metrics.json",metric)
     print(f"Run saved to {out}")
 
