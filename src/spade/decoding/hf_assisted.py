@@ -132,7 +132,7 @@ class QwenPair:
         start = time.perf_counter()
         round_index = 0
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
-        dynamic_k_controller = DynamicKController(dynamic_k_config) if (mode == "M4" and dynamic_k) else None
+        dynamic_k_controller = DynamicKController(dynamic_k_config) if dynamic_k else None
 
         while len(generated) < max_new_tokens:
             prefix = prompt_ids + generated
@@ -311,7 +311,7 @@ class QwenPair:
         target_cache_mgr = CacheManager()
         draft_cache_mgr = CacheManager()
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
-        dynamic_k_controller = DynamicKController(dynamic_k_config) if (mode == "M4" and dynamic_k) else None
+        dynamic_k_controller = DynamicKController(dynamic_k_config) if dynamic_k else None
 
         # Target prefill
         self._sync(target_device)
