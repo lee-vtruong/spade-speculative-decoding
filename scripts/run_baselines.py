@@ -18,7 +18,7 @@ def write_json(path: Path, value): path.write_text(json.dumps(value,ensure_ascii
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--mode",choices=["B0","B0-S","B1","B2"],required=True)
+    p.add_argument("--mode",choices=["B0","B0-S","B1","B2","M4"],required=True)
     p.add_argument("--input",type=Path,required=True,help="Prepared benchmark JSONL")
     p.add_argument("--output-root",type=Path,default=Path(os.environ.get("OUTPUT_ROOT","outputs/runs")))
     p.add_argument("--run-id",default=None)

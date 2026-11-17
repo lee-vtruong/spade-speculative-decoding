@@ -18,7 +18,7 @@ for root in a.run_dirs:
     tt=[json.loads(x) for x in (root/"token_traces.jsonl").read_text(encoding="utf-8").split("\n") if x.strip()]
     for row in rr+tt: row.setdefault("mode",mode)
     rounds.extend(rr); tokens.extend(tt)
-summary=acceptance_summary([x for x in tokens if x.get("mode")=="B2"],[x for x in rounds if x.get("mode")=="B2"])
+summary=acceptance_summary([x for x in tokens if x.get("mode") in {"B2", "M4"}],[x for x in rounds if x.get("mode") in {"B2", "M4"}])
 (a.output_dir/"acceptance_summary.json").write_text(json.dumps(summary,indent=2)+"\n",encoding="utf-8")
 report=analyze_runs([str(x) for x in a.run_dirs],a.output_dir)
 exp_report=generate_experiment_report(a.run_dirs, a.output_dir)

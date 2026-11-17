@@ -16,6 +16,8 @@ from .sampling import processed_distribution, sample_distribution
 from .speculative import exact_speculative_round, greedy_verify
 from .cache_utils import CacheManager, crop_past_key_values, get_cache_seq_length
 from ..instrumentation.token_analysis import categorize_token, evidence_overlap
+from ..adaptive.evidence_indexer import EvidenceIndexer
+from ..adaptive.biasing import apply_evidence_bias, EvidenceBiasingConfig
 
 @dataclass
 class Generation:
@@ -67,9 +69,9 @@ class QwenPair:
                  evidence_texts: list[str] | None = None,
                  cache_strategy: str = "recompute") -> Generation:
         """Run B0/B0-S/B1/B2 with recompute or kv_cache strategy."""
-        if mode not in {"B0", "B0-S", "B1", "B2"}:
+        if mode not in {"B0", "B0-S", "B1", "B2", "M4"}:
             raise ValueError(f"Unsupported mode {mode}")
-        if mode in {"B1", "B2"} and self.draft is None:
+        if mode in {"B1", "B2", "M4"} and self.draft is None:
             raise ValueError(f"{mode} requires a draft model")
         if max_new_tokens < 1 or draft_length < 1:
             raise ValueError("Token limits must be positive")
@@ -122,6 +124,7 @@ class QwenPair:
         has_target_prefill = False
         start = time.perf_counter()
         round_index = 0
+        evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
 
         while len(generated) < max_new_tokens:
             prefix = prompt_ids + generated
@@ -161,6 +164,8 @@ class QwenPair:
             draft_prefix = list(prefix)
             for _ in range(count):
                 qlogits = self._logits(self.draft, draft_prefix, draft_device)
+                if mode == "M4" and evidence_indexer is not None:
+                    qlogits = apply_evidence_bias(qlogits, evidence_indexer, draft_prefix)
                 q = processed_distribution(qlogits, temperature, top_k, top_p)
                 token = int(torch.argmax(q).item()) if mode == "B1" else sample_distribution(q, generator)
                 proposed.append(token)
@@ -249,8 +254,8 @@ class QwenPair:
                 st = status[i] if i < len(status) else "discarded_after_rejection"
                 reached = st != "discarded_after_rejection"
                 token_text = self.target_tokenizer.decode([token])
-                tv = float((0.5 * torch.abs(pdist - q).sum()).item()) if mode == "B2" else None
-                token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + generation_start + i, "token_id": token, "token_text": token_text, "draft_probability": qprob, "target_probability": prob, "acceptance_probability": ap if mode == "B2" else None, "total_variation": tv, "expected_acceptance_probability": 1.0 - tv if tv is not None else None, "status": st, "reached_by_verifier": reached, "discarded_after_rejection": st == "discarded_after_rejection", "replacement_token_id": None, "token_category": categorize_token(token_text), "prefix_length": len(prompt_ids) + generation_start, "evidence_overlap": evidence_overlap(token_text, evidence_texts or [])})
+                tv = float((0.5 * torch.abs(pdist - q).sum()).item()) if mode in {"B2", "M4"} else None
+                token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + generation_start + i, "token_id": token, "token_text": token_text, "draft_probability": qprob, "target_probability": prob, "acceptance_probability": ap if mode in {"B2", "M4"} else None, "total_variation": tv, "expected_acceptance_probability": 1.0 - tv if tv is not None else None, "status": st, "reached_by_verifier": reached, "discarded_after_rejection": st == "discarded_after_rejection", "replacement_token_id": None, "token_category": categorize_token(token_text), "prefix_length": len(prompt_ids) + generation_start, "evidence_overlap": evidence_overlap(token_text, evidence_texts or [])})
 
             if extra is not None:
                 extra_text = self.target_tokenizer.decode([extra])
@@ -279,6 +284,7 @@ class QwenPair:
 
         target_cache_mgr = CacheManager()
         draft_cache_mgr = CacheManager()
+        evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
 
         # Target prefill
         self._sync(target_device)
@@ -352,7 +358,11 @@ class QwenPair:
             draft_cache_len_before = draft_cache_mgr.seq_length
 
             for _ in range(count):
-                q = processed_distribution(cur_draft_logits, temperature, top_k, top_p)
+                logits_to_process = cur_draft_logits
+                if mode == "M4" and evidence_indexer is not None:
+                    context_now = prompt_ids + generated + proposed
+                    logits_to_process = apply_evidence_bias(cur_draft_logits, evidence_indexer, context_now)
+                q = processed_distribution(logits_to_process, temperature, top_k, top_p)
                 token = int(torch.argmax(q).item()) if mode == "B1" else sample_distribution(q, generator)
                 proposed.append(token)
                 q_dists.append(q)
@@ -445,8 +455,8 @@ class QwenPair:
                 st = status[i] if i < len(status) else "discarded_after_rejection"
                 reached = st != "discarded_after_rejection"
                 token_text = self.target_tokenizer.decode([token])
-                tv = float((0.5 * torch.abs(pdist - q).sum()).item()) if mode == "B2" else None
-                token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + generation_start + i, "token_id": token, "token_text": token_text, "draft_probability": qprob, "target_probability": prob, "acceptance_probability": ap if mode == "B2" else None, "total_variation": tv, "expected_acceptance_probability": 1.0 - tv if tv is not None else None, "status": st, "reached_by_verifier": reached, "discarded_after_rejection": st == "discarded_after_rejection", "replacement_token_id": None, "token_category": categorize_token(token_text), "prefix_length": len(prompt_ids) + generation_start, "evidence_overlap": evidence_overlap(token_text, evidence_texts or [])})
+                tv = float((0.5 * torch.abs(pdist - q).sum()).item()) if mode in {"B2", "M4"} else None
+                token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": round_index, "absolute_token_position": len(prompt_ids) + generation_start + i, "token_id": token, "token_text": token_text, "draft_probability": qprob, "target_probability": prob, "acceptance_probability": ap if mode in {"B2", "M4"} else None, "total_variation": tv, "expected_acceptance_probability": 1.0 - tv if tv is not None else None, "status": st, "reached_by_verifier": reached, "discarded_after_rejection": st == "discarded_after_rejection", "replacement_token_id": None, "token_category": categorize_token(token_text), "prefix_length": len(prompt_ids) + generation_start, "evidence_overlap": evidence_overlap(token_text, evidence_texts or [])})
 
             if extra is not None:
                 extra_text = self.target_tokenizer.decode([extra])
