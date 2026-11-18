@@ -47,15 +47,19 @@ class QwenPair:
         return model.get_input_embeddings().weight.device
 
     @staticmethod
-    def _logits(model, ids: list[int], device: torch.device) -> torch.Tensor:
-        input_ids = torch.tensor([ids], dtype=torch.long, device=device)
-        kwargs = {"input_ids": input_ids, "use_cache": False}
+    def _supports_logits_to_keep(model) -> bool:
         try:
             forward = getattr(model, "forward", model.__call__)
-            if "logits_to_keep" in inspect.signature(forward).parameters:
-                kwargs["logits_to_keep"] = 1
+            return "logits_to_keep" in inspect.signature(forward).parameters
         except (TypeError, ValueError):
-            pass
+            return False
+
+    @staticmethod
+    def _logits(model, ids: list[int], device: torch.device) -> torch.Tensor:
+        input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+        kwargs: dict[str, Any] = {"input_ids": input_ids, "use_cache": False}
+        if QwenPair._supports_logits_to_keep(model):
+            kwargs["logits_to_keep"] = 1
         with torch.inference_mode():
             return model(**kwargs).logits[0, -1].float().to(device)
 
@@ -240,8 +244,19 @@ class QwenPair:
                     biasing_config=biasing_config,
                     enable_biasing=enable_biasing,
                 )
-            except Exception:
+            except Exception as exc:
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
+                if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
+                    import sys
+                    print(
+                        f"[WARN] KV-cache OOM on claim={claim_id} prompt_tokens={len(prompt_ids)} "
+                        f"draft_tokens={len(draft_prompt_ids) if draft_prompt_ids is not None else len(prompt_ids)}; "
+                        f"falling back to recompute: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                 pass
 
         return self._generate_recompute(
@@ -476,8 +491,11 @@ class QwenPair:
         self._sync(target_device)
         t0 = time.perf_counter()
         inp = torch.tensor([prompt_ids], dtype=torch.long, device=target_device)
+        target_prefill_kwargs: dict[str, Any] = {"input_ids": inp, "use_cache": True}
+        if self._supports_logits_to_keep(self.target):
+            target_prefill_kwargs["logits_to_keep"] = 1
         with torch.inference_mode():
-            out = self.target(input_ids=inp, use_cache=True)
+            out = self.target(**target_prefill_kwargs)
         self._sync(target_device)
         target_prefill_s = time.perf_counter() - t0
         timings["prompt_prefill_s"] += target_prefill_s
@@ -486,6 +504,7 @@ class QwenPair:
         peak_target_kv_bytes = target_kv_prefill_bytes
         timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
         next_target_logits = out.logits[0, -1].float()
+        del out, inp
 
         # Draft prefill (on draft_base_ids — may be shorter/selective than target prompt_ids)
         peak_draft_kv_bytes = 0
@@ -494,8 +513,11 @@ class QwenPair:
             self._sync(draft_device)
             d0 = time.perf_counter()
             dinp = torch.tensor([draft_base_ids], dtype=torch.long, device=draft_device)
+            draft_prefill_kwargs: dict[str, Any] = {"input_ids": dinp, "use_cache": True}
+            if self._supports_logits_to_keep(self.draft):
+                draft_prefill_kwargs["logits_to_keep"] = 1
             with torch.inference_mode():
-                dout = self.draft(input_ids=dinp, use_cache=True)
+                dout = self.draft(**draft_prefill_kwargs)
             self._sync(draft_device)
             timings["draft_prefill_s"] += time.perf_counter() - d0
             draft_cache_mgr.update(dout.past_key_values)
@@ -503,6 +525,7 @@ class QwenPair:
             peak_draft_kv_bytes = draft_kv_prefill_bytes
             timings["draft_kv_prefill_bytes"] = float(draft_kv_prefill_bytes)
             next_draft_logits = dout.logits[0, -1].float()
+            del dout, dinp
         else:
             draft_device = target_device
             next_draft_logits = None
@@ -732,6 +755,10 @@ class QwenPair:
         timings["decode_s"] = time.perf_counter() - start
         timings["target_kv_peak_bytes"] = float(max(peak_target_kv_bytes, target_cache_mgr.memory_bytes))
         timings["draft_kv_peak_bytes"] = float(max(peak_draft_kv_bytes, draft_cache_mgr.memory_bytes))
+        target_cache_mgr.reset()
+        draft_cache_mgr.reset()
+        if target_device.type == "cuda" and len(prompt_ids) >= 4096:
+            torch.cuda.empty_cache()
         decoded = self.target_tokenizer.decode(generated, skip_special_tokens=True)
 
         for event in raw_round_events:

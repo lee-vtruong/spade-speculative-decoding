@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -53,6 +54,24 @@ def _model_device(model: Any) -> torch.device:
     return torch.device("cpu")
 
 
+def _supports_logits_to_keep(model: Any) -> bool:
+    try:
+        forward = getattr(model, "forward", model.__call__)
+        return "logits_to_keep" in inspect.signature(forward).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _tail_logits(model: Any, input_ids: torch.Tensor, g_len: int) -> torch.Tensor:
+    kwargs: dict[str, Any] = {"input_ids": input_ids, "use_cache": False}
+    if _supports_logits_to_keep(model):
+        kwargs["logits_to_keep"] = g_len
+    out = model(**kwargs)
+    logits = out.logits[0, -g_len:].detach().float()
+    del out
+    return logits
+
+
 def replay_asymmetric_claim_prefixes(
     *,
     row: dict[str, Any],
@@ -84,7 +103,8 @@ def replay_asymmetric_claim_prefixes(
 
     with torch.inference_mode():
         t_inp = torch.tensor([t_full_ids], dtype=torch.long, device=t_dev)
-        t_logits_all = target_model(input_ids=t_inp, use_cache=False).logits[0, p_t - 1 : p_t - 1 + g_len].detach().float()
+        t_logits_all = _tail_logits(target_model, t_inp, g_len)
+        del t_inp
 
     # Build draft prompts and run 1 teacher-forced draft forward pass per policy
     policy_logits: dict[str, torch.Tensor] = {}
@@ -103,7 +123,8 @@ def replay_asymmetric_claim_prefixes(
         d_full_ids = d_prompt_ids + token_ids[:-1]
         with torch.inference_mode():
             d_inp = torch.tensor([d_full_ids], dtype=torch.long, device=d_dev)
-            d_logits = draft_model(input_ids=d_inp, use_cache=False).logits[0, p_d - 1 : p_d - 1 + g_len].detach().float()
+            d_logits = _tail_logits(draft_model, d_inp, g_len)
+            del d_inp
         if d_logits.device != t_logits_all.device:
             d_logits = d_logits.to(t_logits_all.device)
         policy_logits[policy] = d_logits
@@ -138,6 +159,9 @@ def replay_asymmetric_claim_prefixes(
             "target_prompt_tokens": p_t,
             "policies": pol_stats,
         })
+    del t_logits_all, policy_logits
+    if t_dev.type == "cuda" and p_t >= 4096:
+        torch.cuda.empty_cache()
     return records
 
 

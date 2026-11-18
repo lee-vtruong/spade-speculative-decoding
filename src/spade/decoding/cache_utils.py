@@ -129,6 +129,9 @@ class CacheManager:
     def update(self, past_key_values: Any) -> None:
         self.past_key_values = past_key_values
 
+    def reset(self) -> None:
+        self.past_key_values = None
+
     def rollback(self, target_length: int) -> None:
         """Crop cache back to target_length."""
         if target_length < self.seq_length:
