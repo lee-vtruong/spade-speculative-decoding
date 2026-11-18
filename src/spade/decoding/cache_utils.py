@@ -136,3 +136,40 @@ class CacheManager:
 
     def position_ids_for(self, num_tokens: int, device: torch.device) -> torch.Tensor:
         return build_position_ids(self.seq_length, num_tokens, device)
+
+    @property
+    def memory_bytes(self) -> int:
+        return get_cache_memory_bytes(self.past_key_values)
+
+
+def get_cache_memory_bytes(past_key_values: Any) -> int:
+    """Return total byte footprint of all key/value tensors stored in past_key_values."""
+    if past_key_values is None:
+        return 0
+    total = 0
+    # Transformers 5.x DynamicCache.layers -> layer.keys / layer.values
+    layers = getattr(past_key_values, "layers", None)
+    if isinstance(layers, (list, tuple)) and layers:
+        for layer in layers:
+            for attr in ("keys", "values"):
+                t = getattr(layer, attr, None)
+                if isinstance(t, torch.Tensor):
+                    total += int(t.numel() * t.element_size())
+        if total > 0:
+            return total
+    # DynamicCache.key_cache / value_cache
+    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
+        for t in list(past_key_values.key_cache) + list(past_key_values.value_cache):
+            if isinstance(t, torch.Tensor):
+                total += int(t.numel() * t.element_size())
+        return total
+    # Legacy tuple-of-tuples ((k0, v0), ...)
+    if isinstance(past_key_values, (tuple, list)):
+        for layer in past_key_values:
+            if isinstance(layer, (tuple, list)):
+                for t in layer:
+                    if isinstance(t, torch.Tensor):
+                        total += int(t.numel() * t.element_size())
+            elif isinstance(layer, torch.Tensor):
+                total += int(layer.numel() * layer.element_size())
+    return total

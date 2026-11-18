@@ -72,8 +72,9 @@ class QwenPair:
                  dynamic_k: bool = False,
                  dynamic_k_config: DynamicKConfig | None = None,
                  biasing_config: EvidenceBiasingConfig | None = None,
-                 enable_biasing: bool = True) -> Generation:
-        """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy."""
+                 enable_biasing: bool = True,
+                 draft_prompt: str | None = None) -> Generation:
+        """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy (supports asymmetric draft_prompt)."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4", "HF", "HF-Assisted"}:
             raise ValueError(f"Unsupported mode {mode}")
         if mode in {"B1", "B2", "M4", "HF", "HF-Assisted"} and self.draft is None:
@@ -88,6 +89,16 @@ class QwenPair:
         context_limit = getattr(getattr(self.target, "config", None), "max_position_embeddings", None)
         if isinstance(context_limit, int) and len(prompt_ids) + max_new_tokens > context_limit:
             raise ValueError(f"Prompt ({len(prompt_ids)} tokens) plus requested output ({max_new_tokens}) exceeds target context limit ({context_limit})")
+
+        if draft_prompt is not None and self.draft is not None:
+            draft_tok = self.draft_tokenizer or self.target_tokenizer
+            serialized_draft = format_qwen_prompt(draft_tok, draft_prompt)
+            draft_prompt_ids = draft_tok(serialized_draft, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
+            draft_limit = getattr(getattr(self.draft, "config", None), "max_position_embeddings", None)
+            if isinstance(draft_limit, int) and len(draft_prompt_ids) + max_new_tokens > draft_limit:
+                raise ValueError(f"Draft prompt ({len(draft_prompt_ids)} tokens) plus requested output ({max_new_tokens}) exceeds draft context limit ({draft_limit})")
+        else:
+            draft_prompt_ids = prompt_ids
 
         target_device = self._input_device(self.target)
         target_eos = self.target_tokenizer.eos_token_id
@@ -219,7 +230,8 @@ class QwenPair:
         if cache_strategy == "kv_cache":
             try:
                 return self._generate_kv_cache(
-                    prompt_ids=prompt_ids, mode=mode, max_new_tokens=max_new_tokens,
+                    prompt_ids=prompt_ids, draft_prompt_ids=draft_prompt_ids,
+                    mode=mode, max_new_tokens=max_new_tokens,
                     draft_length=draft_length, temperature=temperature, top_k=top_k,
                     top_p=top_p, generator=generator, target_device=target_device,
                     target_eos=target_eos, run_id=run_id, claim_id=claim_id,
@@ -233,7 +245,8 @@ class QwenPair:
                 pass
 
         return self._generate_recompute(
-            prompt_ids=prompt_ids, mode=mode, max_new_tokens=max_new_tokens,
+            prompt_ids=prompt_ids, draft_prompt_ids=draft_prompt_ids,
+            mode=mode, max_new_tokens=max_new_tokens,
             draft_length=draft_length, temperature=temperature, top_k=top_k,
             top_p=top_p, generator=generator, target_device=target_device,
             target_eos=target_eos, run_id=run_id, claim_id=claim_id,
@@ -251,11 +264,19 @@ class QwenPair:
                             dynamic_k: bool = False,
                             dynamic_k_config: DynamicKConfig | None = None,
                             biasing_config: EvidenceBiasingConfig | None = None,
-                            enable_biasing: bool = True) -> Generation:
+                            enable_biasing: bool = True,
+                            draft_prompt_ids: list[int] | None = None) -> Generation:
+        draft_base_ids = prompt_ids if draft_prompt_ids is None else draft_prompt_ids
         generated = []
         round_rows = []
         token_rows = []
-        timings = {"prompt_prefill_s": 0.0, "draft_prefill_s": 0.0, "draft_generation_s": 0.0, "target_verification_s": 0.0, "correction_s": 0.0, "decode_s": 0.0}
+        timings = {
+            "prompt_prefill_s": 0.0, "draft_prefill_s": 0.0, "draft_generation_s": 0.0,
+            "target_verification_s": 0.0, "correction_s": 0.0, "decode_s": 0.0,
+            "draft_prompt_tokens": float(len(draft_base_ids)),
+            "draft_kv_prefill_bytes": 0.0, "draft_kv_peak_bytes": 0.0,
+            "target_kv_prefill_bytes": 0.0, "target_kv_peak_bytes": 0.0,
+        }
         has_target_prefill = False
         start = time.perf_counter()
         round_index = 0
@@ -295,7 +316,7 @@ class QwenPair:
                 continue
 
             draft_device = self._input_device(self.draft)
-            draft_prefix = list(prefix)
+            draft_prefix = list(draft_base_ids) + list(generated)
             current_k = draft_length
             dynamic_reason = None
             first_qlogits = None
@@ -431,19 +452,27 @@ class QwenPair:
                            dynamic_k: bool = False,
                            dynamic_k_config: DynamicKConfig | None = None,
                            biasing_config: EvidenceBiasingConfig | None = None,
-                           enable_biasing: bool = True) -> Generation:
-        """KV-cache accelerated generation with rollback on rejection."""
+                           enable_biasing: bool = True,
+                           draft_prompt_ids: list[int] | None = None) -> Generation:
+        """KV-cache accelerated generation with rollback on rejection (supports asymmetric draft_prompt_ids)."""
+        draft_base_ids = prompt_ids if draft_prompt_ids is None else draft_prompt_ids
         generated = []
         round_rows = []
         token_rows = []
-        timings = {"prompt_prefill_s": 0.0, "draft_prefill_s": 0.0, "draft_generation_s": 0.0, "target_verification_s": 0.0, "correction_s": 0.0, "decode_s": 0.0}
+        timings = {
+            "prompt_prefill_s": 0.0, "draft_prefill_s": 0.0, "draft_generation_s": 0.0,
+            "target_verification_s": 0.0, "correction_s": 0.0, "decode_s": 0.0,
+            "draft_prompt_tokens": float(len(draft_base_ids)),
+            "draft_kv_prefill_bytes": 0.0, "draft_kv_peak_bytes": 0.0,
+            "target_kv_prefill_bytes": 0.0, "target_kv_peak_bytes": 0.0,
+        }
 
         target_cache_mgr = CacheManager()
         draft_cache_mgr = CacheManager()
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
         dynamic_k_controller = DynamicKController(dynamic_k_config) if dynamic_k else None
 
-        # Target prefill
+        # Target prefill (always on full target prompt_ids)
         self._sync(target_device)
         t0 = time.perf_counter()
         inp = torch.tensor([prompt_ids], dtype=torch.long, device=target_device)
@@ -453,19 +482,26 @@ class QwenPair:
         target_prefill_s = time.perf_counter() - t0
         timings["prompt_prefill_s"] += target_prefill_s
         target_cache_mgr.update(out.past_key_values)
+        target_kv_prefill_bytes = target_cache_mgr.memory_bytes
+        peak_target_kv_bytes = target_kv_prefill_bytes
+        timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
         next_target_logits = out.logits[0, -1].float()
 
-        # Draft prefill if draft model is used
+        # Draft prefill (on draft_base_ids — may be shorter/selective than target prompt_ids)
+        peak_draft_kv_bytes = 0
         if self.draft is not None:
             draft_device = self._input_device(self.draft)
             self._sync(draft_device)
             d0 = time.perf_counter()
-            dinp = torch.tensor([prompt_ids], dtype=torch.long, device=draft_device)
+            dinp = torch.tensor([draft_base_ids], dtype=torch.long, device=draft_device)
             with torch.inference_mode():
                 dout = self.draft(input_ids=dinp, use_cache=True)
             self._sync(draft_device)
             timings["draft_prefill_s"] += time.perf_counter() - d0
             draft_cache_mgr.update(dout.past_key_values)
+            draft_kv_prefill_bytes = draft_cache_mgr.memory_bytes
+            peak_draft_kv_bytes = draft_kv_prefill_bytes
+            timings["draft_kv_prefill_bytes"] = float(draft_kv_prefill_bytes)
             next_draft_logits = dout.logits[0, -1].float()
         else:
             draft_device = target_device
@@ -694,6 +730,8 @@ class QwenPair:
             round_index += 1
 
         timings["decode_s"] = time.perf_counter() - start
+        timings["target_kv_peak_bytes"] = float(max(peak_target_kv_bytes, target_cache_mgr.memory_bytes))
+        timings["draft_kv_peak_bytes"] = float(max(peak_draft_kv_bytes, draft_cache_mgr.memory_bytes))
         decoded = self.target_tokenizer.decode(generated, skip_special_tokens=True)
 
         for event in raw_round_events:

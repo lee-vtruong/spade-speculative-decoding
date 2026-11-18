@@ -58,3 +58,27 @@
 - **MODIFY (`TARGETED_MODIFICATION_CANDIDATE`, max 1–2 changes):** Overall lift $< +1.0\text{ pp}$, BUT audit identifies a concrete failure regime (e.g., `order=1` unigram matches or large $|S_E|$ with $p(S_E) \approx 0$) AND a clean positive regime achieving $\ge +0.50\text{ pp}$ lift (95% CI $> 0$).
 - **DROP / REFRAME (`DROP_OR_REFRAME_AS_NEGATIVE_RESULT`):** Neither overall nor any clean subgroup achieves $\ge +0.50\text{ pp}$ with 95% CI $> 0$, or biasing overhead exceeds theoretical maximum round savings. No new algorithm implemented prior to running M4.1 on GPU.
 
+---
+
+## 2026-11-18 (Phase 3) — M4.1 v1/v2 Negative Result & Pivot to M4.2 Evidence-Selective Context Speculative Decoding
+
+### 1. M4.1 v1 & v2 Findings (Preserved as Empirical Negative Result)
+- Audited 9,331 fixed teacher-forced prefixes across 100 claims (`pilot100`, commits `a94c4a3` and `aeef822`, `git_dirty=False`):
+  - **Best observed global expected acceptance gain** across 26 tested biasing configs: `+0.1123 pp` (`orig-static-b0p50`, $p=0.0036$); `orig-entropy-b1p50` achieved `+0.1087 pp` ($p=0.0026$). Note: this is the best observed gain across the tested surface n-gram biasing configs on these prefixes, not a universal theoretical ceiling.
+  - **Targeted precision + band-pass + draft-support gating (`bandpass-o2-c3-m05-b0p50`):** boosted per-intervention gain 12.5$\times$ (`+3.06 pp` on the `3.12%` biased prefixes) and cut overhead 2.6$\times$ (`24.6 us` vs `65.0 us`), yielding `+0.0953 pp` globally ($p=0.0096$).
+  - **Core diagnostic finding (291 filtered prefixes):** When the target copies evidence (`164` prefixes, $p(S_E)=0.972$), biasing yields `+26.50 pp` ($p=0.0000$); when the target paraphrases/diverges (`102` prefixes, $p(S_E)=0.000$, despite draft $q_{\text{base}}(S_E)=0.304$), the same biasing causes `-39.58 pp` ($p=0.0000$). Surface n-gram biasing cannot reliably predict *how* the target uses evidence without access to $p$.
+
+### 2. Milestone M4.2 — Evidence-Selective Context Speculative Decoding
+- **Research Question:** *Can a lightweight draft model selectively attend to a compact evidence context to reduce drafting cost while maintaining high speculative acceptance under a full-context target model?*
+- **Novelty Positioning vs. Prior Art:**
+  - **SpecExtend (arXiv:2505.20776):** Post-verification KV eviction using target attention scores on raw token chunks (requires attention score extraction, task-agnostic).
+  - **TriForce / MagicDec (ICLR 2025):** Generic streaming/retrieval sparse-KV compression for long generic sequences or self-speculation (task-agnostic, does not preserve structured evidence IDs or claim-evidence units).
+  - **AsymSpec / Speculative RAG:** Either compresses the verifier's context (breaking exact full-context target distribution) or fine-tunes a specialist drafter.
+  - **M4.2 Positioning:** Training-free, exact-distribution-preserving (target always verifies on full evidence under Leviathan exact sampling), FlashAttention-compatible (zero target attention extraction), operating at structured **claim-evidence passage/sentence units BEFORE draft prefill** while preserving citation IDs (`E1..Em`).
+- **3 Pilot Configurations (Fixed Target = Full Evidence, B2 K=4):**
+  1. `Baseline`: Target = Full Evidence, Draft = Full Evidence.
+  2. `Selective-TopK`: Target = Full Evidence, Draft = Top-$k$ claim-relevant evidence passages (`src/spade/adaptive/context_selection.py`, zero-leakage BM25 on claim text only).
+  3. `Compact`: Target = Full Evidence, Draft = Claim + compact extractive evidence (all `E1..Em` IDs preserved).
+- **Break-Even Criterion:** Shorter draft context is worthwhile iff `(draft_prefill_saved + draft_decode_saved) > (extra_verify_cost + context_selection_cost)` with non-degraded E2E throughput. Evaluated on BOTH short-context (`dev-oracle-pilot100.jsonl`) AND long-context retrieved evidence (`train-retrieved-bounded.jsonl`) so KV-cache scaling is tested honestly.
+
+

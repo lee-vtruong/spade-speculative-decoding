@@ -37,10 +37,15 @@ def main():
     p.add_argument("--order-decay",type=float,default=0.5,help="Higher-order n-gram scaling factor for M4 biasing")
     p.add_argument("--entropy-threshold",type=float,default=2.0,help="Entropy threshold (nats) for sigmoid gating in M4")
     p.add_argument("--max-boost-cap",type=float,default=3.0,help="Upper bound on applied logit boost in M4")
+    p.add_argument("--draft-context-policy",choices=["full","selective_topk","compact"],default="full",help="M4.2 asymmetric draft context policy (target always uses full evidence)")
+    p.add_argument("--draft-top-k",type=int,default=2,help="Evidence passages retained for draft under selective_topk")
+    p.add_argument("--draft-compact-sentences",type=int,default=1,help="Max claim-salient sentences per evidence passage under compact")
+    p.add_argument("--draft-compact-chars",type=int,default=160,help="Max characters per evidence passage under compact")
     a=p.parse_args()
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
     if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
     if a.max_boost_cap < 0.0: p.error("--max-boost-cap must be non-negative")
+    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16: p.error("Invalid draft context policy hyperparameters")
     rows=read_jsonl(a.input)
     if a.limit is not None: rows=rows[:a.limit]
     if not rows: p.error("Input JSONL has no examples")
@@ -53,6 +58,7 @@ def main():
         import torch, transformers
         from spade.decoding.hf_assisted import QwenPair
         from spade.adaptive.biasing import EvidenceBiasingConfig
+        from spade.adaptive.context_selection import build_draft_context
         from spade.benchmark.evaluation import parse_generation
         from spade.paths import project_root
         from spade.instrumentation.trace_writer import TraceWriter
@@ -67,7 +73,7 @@ def main():
         entropy_threshold=a.entropy_threshold,
         max_boost_cap=a.max_boost_cap,
     ) if a.mode == "M4" else None
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"draft_context_policy":a.draft_context_policy,"draft_top_k":a.draft_top_k,"draft_compact_sentences":a.draft_compact_sentences,"draft_compact_chars":a.draft_compact_chars,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
     env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None,"git_dirty":None}
     try:
@@ -85,8 +91,9 @@ def main():
     if a.global_warmup > 0:
         wrow = rows[0]
         wev = [e.get("text","") for e in wrow.get("evidence",[])]
+        wdraft = build_draft_context(wrow, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars) if a.draft_context_policy != "full" else None
         for gw in range(a.global_warmup):
-            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev)
+            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev,draft_prompt=wdraft.draft_prompt if wdraft else None)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
@@ -97,13 +104,16 @@ def main():
             evidence_texts=[e.get("text","") for e in row.get("evidence",[])]
             for trial in range(a.trials):
                 trial_run_id=f"{run_id}-trial{trial}"
-                generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts)
-                record_run={"run_id":run_id,"claim_id":str(row["claim_id"]),"evidence_mode":row.get("evidence_mode"),"prompt_hash":row.get("prompt_hash"),"evidence_ids":[e.get("evidence_id") for e in row.get("evidence",[]) if e.get("evidence_id")],"evidence_count":len(row.get("evidence",[])),"raw_text":generation.raw_text,"token_ids":generation.token_ids,"prompt_tokens":generation.prompt_tokens,"output_tokens":len(generation.token_ids),"timings":generation.timings,"rounds":generation.rounds,"evaluation":row.get("evaluation",{})}
+                dctx = build_draft_context(row, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars)
+                draft_prompt_arg = dctx.draft_prompt if a.draft_context_policy != "full" else None
+                generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts,draft_prompt=draft_prompt_arg)
+                generation.timings["context_selection_s"] = dctx.context_selection_s
+                record_run={"run_id":run_id,"claim_id":str(row["claim_id"]),"evidence_mode":row.get("evidence_mode"),"prompt_hash":row.get("prompt_hash"),"draft_context_policy":a.draft_context_policy,"draft_selected_evidence_ids":dctx.selected_evidence_ids,"evidence_ids":[e.get("evidence_id") for e in row.get("evidence",[]) if e.get("evidence_id")],"evidence_count":len(row.get("evidence",[])),"raw_text":generation.raw_text,"token_ids":generation.token_ids,"prompt_tokens":generation.prompt_tokens,"output_tokens":len(generation.token_ids),"timings":generation.timings,"rounds":generation.rounds,"evaluation":row.get("evaluation",{})}
                 for trace in generation.rounds: trace["mode"]=a.mode; trace["draft_length_configured"]=a.draft_length
                 for trace in generation.token_traces: trace["mode"]=a.mode; trace["draft_length_configured"]=a.draft_length
                 parsed=parse_generation(generation.raw_text,{e.get("evidence_id") for e in row.get("evidence",[]) if e.get("evidence_id")})
                 record_run.update({"parsed":parsed["parsed"],"parse_success":parsed["parse_success"],"parse_error":parsed["parse_error"],"citation_id_validity":parsed["citation_id_validity"],"citation_id_valid_count":parsed["citation_id_valid_count"],"citation_count":parsed["citation_count"]})
-                trial_metric={"run_id":run_id,"trial_index":trial,"claim_id":str(row["claim_id"]),"prompt_hash":row.get("prompt_hash"),"prompt_tokens":generation.prompt_tokens,"output_tokens":len(generation.token_ids),**generation.timings,"parse_success":parsed["parse_success"]}
+                trial_metric={"run_id":run_id,"trial_index":trial,"claim_id":str(row["claim_id"]),"prompt_hash":row.get("prompt_hash"),"draft_context_policy":a.draft_context_policy,"selected_evidence_count":dctx.selected_evidence_count,"total_evidence_count":dctx.total_evidence_count,"draft_evidence_chars":dctx.draft_evidence_chars,"full_evidence_chars":dctx.full_evidence_chars,"prompt_tokens":generation.prompt_tokens,"output_tokens":len(generation.token_ids),**generation.timings,"parse_success":parsed["parse_success"]}
                 trial_file.write(json.dumps(trial_metric,ensure_ascii=False,allow_nan=False)+"\n"); trial_rows.append(trial_metric)
                 if trial==0:
                     for trace in generation.rounds: writer.write_round(trace)
