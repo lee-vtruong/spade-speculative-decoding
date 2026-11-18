@@ -20,6 +20,12 @@ from ..instrumentation.token_analysis import categorize_token, evidence_overlap
 from ..adaptive.evidence_indexer import EvidenceIndexer
 from ..adaptive.biasing import apply_evidence_bias, EvidenceBiasingConfig
 from ..adaptive.dynamic_k import DynamicKConfig, DynamicKController
+from ..adaptive.context_selection import build_draft_context_from_scores
+from ..adaptive.target_attention_selector import (
+    TargetPrefillAttentionHook,
+    find_evidence_and_sentence_token_spans,
+    score_evidence_from_token_importance,
+)
 
 @dataclass
 class Generation:
@@ -29,6 +35,7 @@ class Generation:
     timings: dict[str, float]
     rounds: list[dict[str, Any]]
     token_traces: list[dict[str, Any]]
+    draft_context_result: Any = None
 
 class QwenPair:
     """Load a checked Qwen target/draft pair from local checkpoint paths."""
@@ -107,7 +114,8 @@ class QwenPair:
                  biasing_config: EvidenceBiasingConfig | None = None,
                  enable_biasing: bool = True,
                  draft_prompt: str | None = None,
-                 distribution_mode: str = "fp64_orig") -> Generation:
+                 distribution_mode: str = "fp64_orig",
+                 target_attn_selector_cfg: dict[str, Any] | None = None) -> Generation:
         """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy (supports asymmetric draft_prompt)."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4", "HF", "HF-Assisted"}:
             raise ValueError(f"Unsupported mode {mode}")
@@ -121,7 +129,18 @@ class QwenPair:
             raise ValueError(f"Unknown cache_strategy: {cache_strategy}")
 
         serialized = format_qwen_prompt(self.target_tokenizer, prompt)
-        prompt_ids = self.target_tokenizer(serialized, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
+        prompt_offsets: list[tuple[int, int]] | None = None
+        if target_attn_selector_cfg is not None:
+            try:
+                enc = self.target_tokenizer(serialized, return_offsets_mapping=True, add_special_tokens=False)
+                prompt_ids = list(enc["input_ids"])
+                prompt_offsets = [(int(a), int(b)) for a, b in enc["offset_mapping"]]
+            except TypeError:
+                prompt_ids = self.target_tokenizer(serialized, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
+                step_c = max(1, len(serialized) // max(1, len(prompt_ids)))
+                prompt_offsets = [(min(len(serialized), i * step_c), min(len(serialized), (i + 1) * step_c)) for i in range(len(prompt_ids))]
+        else:
+            prompt_ids = self.target_tokenizer(serialized, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
         context_limit = getattr(getattr(self.target, "config", None), "max_position_embeddings", None)
         if isinstance(context_limit, int) and len(prompt_ids) + max_new_tokens > context_limit:
             raise ValueError(f"Prompt ({len(prompt_ids)} tokens) plus requested output ({max_new_tokens}) exceeds target context limit ({context_limit})")
@@ -276,9 +295,12 @@ class QwenPair:
                     biasing_config=biasing_config,
                     enable_biasing=enable_biasing,
                     distribution_mode=distribution_mode,
+                    serialized_prompt=serialized,
+                    prompt_offsets=prompt_offsets,
+                    target_attn_selector_cfg=target_attn_selector_cfg,
                 )
             except Exception as exc:
-                if getattr(self, "draft_runner", None) is not None:
+                if getattr(self, "draft_runner", None) is not None or target_attn_selector_cfg is not None:
                     raise
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
                 if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
@@ -504,11 +526,15 @@ class QwenPair:
                            biasing_config: EvidenceBiasingConfig | None = None,
                            enable_biasing: bool = True,
                            draft_prompt_ids: list[int] | None = None,
-                           distribution_mode: str = "fp64_orig") -> Generation:
+                           distribution_mode: str = "fp64_orig",
+                           serialized_prompt: str | None = None,
+                           prompt_offsets: list[tuple[int, int]] | None = None,
+                           target_attn_selector_cfg: dict[str, Any] | None = None) -> Generation:
         """KV-cache accelerated generation with rollback on rejection (supports asymmetric draft_prompt_ids)."""
         draft_base_ids = prompt_ids if draft_prompt_ids is None else draft_prompt_ids
         draft_runner = getattr(self, "draft_runner", None) if (self.draft is not None and mode not in {"B0", "B0-S"}) else None
         use_fast_dist = distribution_mode == "fp32_fast"
+        attn_dctx = None
 
         def _dist1(lg: torch.Tensor) -> torch.Tensor:
             if use_fast_dist:
@@ -532,24 +558,82 @@ class QwenPair:
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
         dynamic_k_controller = DynamicKController(dynamic_k_config) if dynamic_k else None
 
-        # Target prefill (always on full target prompt_ids)
+        # Target prefill (always on full target prompt_ids; optionally hooks tail queries for zero-extra-pass selection)
+        use_target_attn_sel = (
+            target_attn_selector_cfg is not None
+            and self.draft is not None
+            and mode not in {"B0", "B0-S"}
+            and serialized_prompt is not None
+            and prompt_offsets is not None
+        )
         self._sync(target_device)
         t0 = time.perf_counter()
         inp = torch.tensor([prompt_ids], dtype=torch.long, device=target_device)
         target_prefill_kwargs: dict[str, Any] = {"input_ids": inp, "use_cache": True}
         if self._supports_logits_to_keep(self.target):
             target_prefill_kwargs["logits_to_keep"] = 1
-        with torch.inference_mode():
-            out = self.target(**target_prefill_kwargs)
-        self._sync(target_device)
-        target_prefill_s = time.perf_counter() - t0
-        timings["prompt_prefill_s"] += target_prefill_s
-        target_cache_mgr.update(out.past_key_values)
-        target_kv_prefill_bytes = target_cache_mgr.memory_bytes
-        peak_target_kv_bytes = target_kv_prefill_bytes
-        timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
-        next_target_logits = out.logits[0, -1].float()
-        del out, inp
+
+        if use_target_attn_sel:
+            assert target_attn_selector_cfg is not None
+            tail_window = int(target_attn_selector_cfg.get("tail_window", 16))
+            layer_indices = target_attn_selector_cfg.get("layer_indices", None)
+            with TargetPrefillAttentionHook(self.target, layer_indices=layer_indices, tail_window=tail_window) as attn_hook:
+                with torch.inference_mode():
+                    out = self.target(**target_prefill_kwargs)
+                self._sync(target_device)
+                target_prefill_s = time.perf_counter() - t0
+                timings["prompt_prefill_s"] += target_prefill_s
+                target_cache_mgr.update(out.past_key_values)
+                target_kv_prefill_bytes = target_cache_mgr.memory_bytes
+                peak_target_kv_bytes = target_kv_prefill_bytes
+                timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
+                next_target_logits = out.logits[0, -1].float()
+                del out, inp
+
+                # Strictly timed post-prefill target-attention selection (pre-synced, includes GPU matmul + spans + draft tokenization)
+                sel_t0 = time.perf_counter()
+                row_meta = target_attn_selector_cfg["row"]
+                budget_chars = int(target_attn_selector_cfg.get("budget_chars", 10000))
+                ev_list = list(row_meta.get("evidence") or [])
+                full_chars = sum(len(str(e.get("text", ""))) for e in ev_list)
+                if full_chars <= budget_chars or not ev_list:
+                    attn_dctx = build_draft_context_from_scores(
+                        row_meta,
+                        policy="sentence_budget",
+                        sentence_scores_by_passage=None,
+                        budget_chars=budget_chars,
+                    )
+                    draft_base_ids = prompt_ids
+                else:
+                    imp, _ = attn_hook.compute_token_importance(target_cache_mgr.past_key_values)
+                    spans = find_evidence_and_sentence_token_spans(serialized_prompt, ev_list, prompt_offsets)
+                    _, s_scores = score_evidence_from_token_importance(imp, spans)
+                    attn_dctx = build_draft_context_from_scores(
+                        row_meta,
+                        policy="sentence_budget",
+                        sentence_scores_by_passage=s_scores,
+                        budget_chars=budget_chars,
+                    )
+                    dtok = self.draft_tokenizer or self.target_tokenizer
+                    ser_d = format_qwen_prompt(dtok, attn_dctx.draft_prompt)
+                    draft_base_ids = dtok(ser_d, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
+                if draft_runner is not None and len(draft_base_ids) + max_new_tokens >= draft_runner.max_cache_len:
+                    max_allowed = max(64, draft_runner.max_cache_len - max_new_tokens - 8)
+                    draft_base_ids = draft_base_ids[:max_allowed]
+                timings["context_selection_s"] = time.perf_counter() - sel_t0
+                timings["draft_prompt_tokens"] = float(len(draft_base_ids))
+        else:
+            with torch.inference_mode():
+                out = self.target(**target_prefill_kwargs)
+            self._sync(target_device)
+            target_prefill_s = time.perf_counter() - t0
+            timings["prompt_prefill_s"] += target_prefill_s
+            target_cache_mgr.update(out.past_key_values)
+            target_kv_prefill_bytes = target_cache_mgr.memory_bytes
+            peak_target_kv_bytes = target_kv_prefill_bytes
+            timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
+            next_target_logits = out.logits[0, -1].float()
+            del out, inp
 
         # Draft prefill (on draft_base_ids — may be shorter/selective than target prompt_ids)
         peak_draft_kv_bytes = 0
@@ -873,7 +957,7 @@ class QwenPair:
                 extra_text = self.target_tokenizer.decode([ex])
                 target_ex = event["target_extra"]
                 token_rows.append({"run_id": run_id, "claim_id": claim_id, "round_id": r_id, "absolute_token_position": len(prompt_ids) + event["generated_len_at_round"] - 1, "token_id": ex, "token_text": extra_text, "draft_probability": None, "target_probability": float(target_ex[ex].item()) if ev_mode == "B2" else 1.0, "acceptance_probability": None, "total_variation": None, "expected_acceptance_probability": None, "status": "extra_target_token", "reached_by_verifier": False, "discarded_after_rejection": False, "replacement_token_id": None, "token_category": categorize_token(extra_text), "prefix_length": len(prompt_ids) + g_start + len(event["proposed"]), "evidence_overlap": evidence_overlap(extra_text, evidence_texts or [])})
-        return Generation(generated, decoded, len(prompt_ids), timings, round_rows, token_rows)
+        return Generation(generated, decoded, len(prompt_ids), timings, round_rows, token_rows, draft_context_result=attn_dctx)
 
     def generate_hf_assisted(self, prompt: str, max_new_tokens: int = 256, temperature: float = 1.0,
                              top_p: float = 1.0, seed: int = 42) -> str:

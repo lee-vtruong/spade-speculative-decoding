@@ -118,3 +118,83 @@ def test_target_prefill_attention_hook_matches_output_attentions_exact():
     assert got_imp.shape == ref_imp.shape
     max_diff = float(torch.max(torch.abs(got_imp - ref_imp)).item())
     assert max_diff < 1e-5, f"TargetPrefillAttentionHook mismatch vs output_attentions: max_diff={max_diff}"
+
+
+class _OffsetWordTok:
+    eos_token_id = 2
+    pad_token_id = 0
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, enable_thinking=False):
+        return messages[-1]["content"]
+
+    def __call__(self, text, return_tensors=None, return_offsets_mapping=False, add_special_tokens=False):
+        import re
+        matches = list(re.finditer(r"\S+", text))
+        ids = [5 + (i % 45) for i in range(len(matches))]
+        offsets = [(m.start(), m.end()) for m in matches]
+        if return_tensors == "pt":
+            out = {"input_ids": torch.tensor([ids], dtype=torch.long)}
+        else:
+            out = {"input_ids": ids}
+        if return_offsets_mapping:
+            out["offset_mapping"] = offsets
+        return out
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(str(int(i)) for i in ids)
+
+
+def test_qwen_pair_target_attn_sentence_budget_e2e():
+    from spade.decoding.hf_assisted import QwenPair
+
+    transformers = pytest.importorskip("transformers")
+    cfg_cls = getattr(transformers, "Qwen3Config", None)
+    mdl_cls = getattr(transformers, "Qwen3ForCausalLM", None)
+    if cfg_cls is None or mdl_cls is None:
+        pytest.skip("Qwen3 classes unavailable")
+
+    torch.manual_seed(31)
+    cfg = cfg_cls(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=512,
+    )
+    target = mdl_cls(cfg).eval()
+    torch.manual_seed(37)
+    draft = mdl_cls(cfg).eval()
+
+    pair = object.__new__(QwenPair)
+    pair.target = target
+    pair.draft = draft
+    pair.target_tokenizer = _OffsetWordTok()
+    pair.draft_tokenizer = _OffsetWordTok()
+    pair.draft_runner = None
+    pair.draft_setup_timings = None
+    pair.prepare_draft_runner(mode="eager_static", max_cache_len=256, warmup_steps=1)
+
+    row = _sample_multi_evidence_row()
+    gen = pair.generate(
+        row["prompt"],
+        mode="B2",
+        max_new_tokens=10,
+        draft_length=4,
+        temperature=0.7,
+        top_p=0.9,
+        seed=42,
+        cache_strategy="kv_cache",
+        distribution_mode="fp32_fast",
+        target_attn_selector_cfg={"row": row, "budget_chars": 260, "tail_window": 6},
+    )
+    assert gen.draft_context_result is not None
+    assert gen.draft_context_result.selected_evidence_ids == ["E1", "E2", "E3", "E4"]
+    assert gen.draft_context_result.draft_evidence_chars < gen.draft_context_result.full_evidence_chars
+    assert gen.timings["context_selection_s"] > 0.0
+    assert gen.timings["draft_prompt_tokens"] < gen.prompt_tokens
+    n_acc = sum(1 for t in gen.token_traces if t["status"] == "accepted")
+    n_res = sum(1 for t in gen.token_traces if t["status"] == "residual_replacement")
+    n_bon = sum(1 for t in gen.token_traces if t["status"] == "extra_target_token")
+    assert n_acc + n_res + n_bon == len(gen.token_ids) == 10
