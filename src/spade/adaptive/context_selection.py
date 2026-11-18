@@ -21,6 +21,7 @@ from spade.benchmark.prompt_builder import build_prompt
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_ENTITY_RE = re.compile(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*|[A-Z]{2,}|\d[\d,./%-]*)\b")
 _STOPWORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "did", "do", "does",
     "for", "from", "had", "has", "have", "he", "her", "his", "if", "in", "into", "is", "it",
@@ -117,6 +118,199 @@ def _compact_passage_text(
     return joined.strip()
 
 
+def split_evidence_sentences_with_spans(text: str) -> list[tuple[str, int, int]]:
+    """Deterministically split passage text into `(sentence, char_start, char_end)` spans."""
+    if not text or not text.strip():
+        return []
+    spans: list[tuple[str, int, int]] = []
+    pos = 0
+    for m in _SENT_SPLIT_RE.finditer(text):
+        seg = text[pos : m.start()]
+        stripped = seg.strip()
+        if stripped:
+            lead = seg.find(stripped)
+            spans.append((stripped, pos + lead, pos + lead + len(stripped)))
+        pos = m.end()
+    tail = text[pos:]
+    stripped = tail.strip()
+    if stripped:
+        lead = tail.find(stripped)
+        spans.append((stripped, pos + lead, pos + lead + len(stripped)))
+    return spans
+
+
+def _build_hybrid_topk_compact(
+    claim: str,
+    evidence: list[dict[str, Any]],
+    passage_scores: list[float],
+    *,
+    top_k: int = 2,
+    tail_sentences: int = 1,
+    tail_chars: int = 120,
+) -> list[dict[str, str]]:
+    """Keep top-k passages in full and represent remaining passages with 1 compact salient sentence."""
+    if not evidence:
+        return []
+    if top_k >= len(evidence):
+        return [{"evidence_id": str(e.get("evidence_id", f"E{i+1}")), "text": str(e.get("text", ""))} for i, e in enumerate(evidence)]
+    top_set = set(sorted(range(len(evidence)), key=lambda i: (-passage_scores[i], i))[: max(0, top_k)])
+    out: list[dict[str, str]] = []
+    for i, e in enumerate(evidence):
+        eid = str(e.get("evidence_id", f"E{i+1}"))
+        txt = str(e.get("text", ""))
+        if i in top_set:
+            out.append({"evidence_id": eid, "text": txt})
+        else:
+            out.append({
+                "evidence_id": eid,
+                "text": _compact_passage_text(claim, txt, max_sentences=tail_sentences, max_chars=tail_chars),
+            })
+    return out
+
+
+def _build_sentence_budget_evidence(
+    claim: str,
+    evidence: list[dict[str, Any]],
+    *,
+    sentence_scores_by_passage: list[list[float]] | None = None,
+    budget_chars: int = 8000,
+    min_sentences_per_passage: int = 1,
+    max_chars_per_sentence: int = 400,
+) -> list[dict[str, str]]:
+    """Select highest-scoring sentences across all E1..Em under a character budget, preserving order & E-IDs."""
+    if not evidence:
+        return []
+    full_chars = sum(len(str(e.get("text", ""))) for e in evidence)
+    if full_chars <= budget_chars:
+        return [{"evidence_id": str(e.get("evidence_id", f"E{i+1}")), "text": str(e.get("text", ""))} for i, e in enumerate(evidence)]
+
+    # Split every passage into sentences
+    pass_sents: list[list[str]] = []
+    for e in evidence:
+        spans = split_evidence_sentences_with_spans(str(e.get("text", "")))
+        sents = [s[:max_chars_per_sentence].strip() for s, _, _ in spans] if spans else []
+        pass_sents.append(sents)
+
+    if sentence_scores_by_passage is None:
+        # Zero-leakage BM25 + entity/number overlap + light passage-level BM25 prior
+        claim_entities = {m.lower() for m in _ENTITY_RE.findall(claim) if len(m) > 1}
+        p_scores = _score_passages_bm25(claim, [str(e.get("text", "")) for e in evidence])
+        all_flat = [s for sents in pass_sents for s in sents]
+        flat_bm25 = _score_passages_bm25(claim, all_flat) if all_flat else []
+        sentence_scores_by_passage = []
+        cursor = 0
+        for p_idx, sents in enumerate(pass_sents):
+            sc_list: list[float] = []
+            for s in sents:
+                base = flat_bm25[cursor]
+                cursor += 1
+                s_low = s.lower()
+                ent_hits = sum(1 for ent in claim_entities if ent in s_low)
+                sc_list.append(base + 0.75 * ent_hits + 0.25 * p_scores[p_idx])
+            sentence_scores_by_passage.append(sc_list)
+
+    chosen: dict[int, set[int]] = {i: set() for i in range(len(evidence))}
+    used_chars = 0
+
+    # Guarantee at least `min_sentences_per_passage` top sentence(s) per passage so every E-ID stays visible
+    if min_sentences_per_passage > 0:
+        for p_idx, (sents, scs) in enumerate(zip(pass_sents, sentence_scores_by_passage)):
+            if not sents:
+                continue
+            ranked = sorted(range(len(sents)), key=lambda si: (-scs[si], si))
+            for si in ranked[:min_sentences_per_passage]:
+                chosen[p_idx].add(si)
+                used_chars += len(sents[si]) + 1
+
+    # Greedily add highest-scoring remaining sentences across all passages until budget_chars
+    candidates: list[tuple[float, int, int]] = []
+    for p_idx, (sents, scs) in enumerate(zip(pass_sents, sentence_scores_by_passage)):
+        for si, sc in enumerate(scs):
+            if si not in chosen[p_idx]:
+                candidates.append((sc, p_idx, si))
+    candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
+
+    for _, p_idx, si in candidates:
+        slen = len(pass_sents[p_idx][si]) + 1
+        if used_chars + slen > budget_chars:
+            continue
+        chosen[p_idx].add(si)
+        used_chars += slen
+
+    out: list[dict[str, str]] = []
+    for p_idx, e in enumerate(evidence):
+        eid = str(e.get("evidence_id", f"E{p_idx+1}"))
+        sents = pass_sents[p_idx]
+        if not sents:
+            out.append({"evidence_id": eid, "text": ""})
+        else:
+            sel_text = " ".join(sents[si] for si in sorted(chosen[p_idx]))
+            out.append({"evidence_id": eid, "text": sel_text})
+    return out
+
+
+def build_draft_context_from_scores(
+    row: dict[str, Any],
+    *,
+    policy: str,
+    passage_scores: list[float] | None = None,
+    sentence_scores_by_passage: list[list[float]] | None = None,
+    top_k: int = 2,
+    compact_sentences: int = 1,
+    compact_chars: int = 120,
+    budget_chars: int = 8000,
+    extra_selection_s: float = 0.0,
+) -> DraftContextResult:
+    """Build draft context from externally supplied zero-leakage scores (e.g. target prefill attention)."""
+    claim = str(row.get("claim", ""))
+    evidence = list(row.get("evidence") or [])
+    ev_mode = str(row.get("evidence_mode") or "retrieved")
+    if ev_mode not in ("retrieved", "oracle_qa"):
+        ev_mode = "oracle_qa" if "oracle" in ev_mode else "retrieved"
+    full_chars = sum(len(str(e.get("text", ""))) for e in evidence)
+
+    t0 = time.perf_counter()
+    if policy == "selective_topk":
+        scores = passage_scores if passage_scores is not None else _score_passages_bm25(claim, [str(e.get("text", "")) for e in evidence])
+        if top_k == 0 or not evidence:
+            selected = []
+        elif top_k >= len(evidence):
+            selected = evidence
+        else:
+            chosen_idx = sorted(sorted(range(len(evidence)), key=lambda i: (-scores[i], i))[:top_k])
+            selected = [evidence[i] for i in chosen_idx]
+    elif policy == "hybrid_topk_compact":
+        scores = passage_scores if passage_scores is not None else _score_passages_bm25(claim, [str(e.get("text", "")) for e in evidence])
+        selected = _build_hybrid_topk_compact(
+            claim, evidence, scores, top_k=top_k, tail_sentences=compact_sentences, tail_chars=compact_chars
+        )
+    elif policy == "sentence_budget":
+        selected = _build_sentence_budget_evidence(
+            claim,
+            evidence,
+            sentence_scores_by_passage=sentence_scores_by_passage,
+            budget_chars=budget_chars,
+        )
+    else:
+        raise ValueError(f"Unsupported scored policy: {policy!r}")
+
+    draft_prompt, draft_hash = build_prompt(claim, selected, mode=ev_mode)
+    sel_ids = [str(e.get("evidence_id", "")) for e in selected]
+    draft_chars = sum(len(str(e.get("text", ""))) for e in selected)
+    selection_s = (time.perf_counter() - t0) + float(extra_selection_s)
+    return DraftContextResult(
+        policy=policy,
+        draft_prompt=draft_prompt,
+        draft_prompt_hash=draft_hash,
+        selected_evidence_ids=sel_ids,
+        total_evidence_count=len(evidence),
+        selected_evidence_count=len(sel_ids),
+        full_evidence_chars=full_chars,
+        draft_evidence_chars=draft_chars,
+        context_selection_s=selection_s,
+    )
+
+
 def build_draft_context(
     row: dict[str, Any],
     *,
@@ -124,18 +318,30 @@ def build_draft_context(
     top_k: int = 2,
     compact_sentences: int = 1,
     compact_chars: int = 160,
+    budget_chars: int = 8000,
 ) -> DraftContextResult:
     """Construct draft prompt under the requested policy without touching target prompt or gold labels.
 
     Args:
         row: Prepared benchmark row containing 'claim', 'evidence', 'prompt', and 'evidence_mode'.
-        policy: One of {"full", "selective_topk", "compact"}.
-        top_k: Number of evidence passages retained under 'selective_topk'.
-        compact_sentences: Number of claim-salient sentences kept per passage under 'compact'.
-        compact_chars: Character budget per compacted passage under 'compact'.
+        policy: One of {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget"}.
+        top_k: Number of evidence passages retained under 'selective_topk' / 'hybrid_topk_compact'.
+        compact_sentences: Number of claim-salient sentences kept per passage under 'compact' / tail.
+        compact_chars: Character budget per compacted passage under 'compact' / tail.
+        budget_chars: Total character budget across all evidence under 'sentence_budget'.
     """
-    if policy not in {"full", "selective_topk", "compact"}:
+    if policy not in {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget"}:
         raise ValueError(f"Unsupported draft context policy: {policy!r}")
+
+    if policy in {"hybrid_topk_compact", "sentence_budget"}:
+        return build_draft_context_from_scores(
+            row,
+            policy=policy,
+            top_k=top_k,
+            compact_sentences=compact_sentences,
+            compact_chars=compact_chars,
+            budget_chars=budget_chars,
+        )
 
     claim = str(row.get("claim", ""))
     evidence = list(row.get("evidence") or [])
