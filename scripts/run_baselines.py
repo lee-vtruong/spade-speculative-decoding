@@ -32,8 +32,15 @@ def main():
     p.add_argument("--cache-strategy",choices=["recompute","kv_cache"],default="recompute",help="Inference cache strategy: recompute (default) or kv_cache")
     p.add_argument("--dynamic-k",action="store_true",default=False,help="Enable dynamic draft length adaptation K(t) in {2, 4, 6} for M4")
     p.add_argument("--no-entropy-gating",action="store_true",default=False,help="Disable entropy gating in M4 draft biasing (ablation)")
+    p.add_argument("--no-biasing",action="store_true",default=False,help="Disable evidence logit biasing in M4 (e.g. Dynamic-only ablation)")
+    p.add_argument("--beta0",type=float,default=1.5,help="Base evidence logit biasing weight beta_0 (>= 0.0) for M4")
+    p.add_argument("--order-decay",type=float,default=0.5,help="Higher-order n-gram scaling factor for M4 biasing")
+    p.add_argument("--entropy-threshold",type=float,default=2.0,help="Entropy threshold (nats) for sigmoid gating in M4")
+    p.add_argument("--max-boost-cap",type=float,default=3.0,help="Upper bound on applied logit boost in M4")
     a=p.parse_args()
-    if a.max_new_tokens<1 or a.trials<1 or a.warmup<0: p.error("Invalid token/warmup/trial count")
+    if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
+    if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
+    if a.max_boost_cap < 0.0: p.error("--max-boost-cap must be non-negative")
     rows=read_jsonl(a.input)
     if a.limit is not None: rows=rows[:a.limit]
     if not rows: p.error("Input JSONL has no examples")
@@ -52,8 +59,15 @@ def main():
     except ImportError as exc: raise SystemExit(f"Required runtime dependency missing: {exc}") from exc
     pair=QwenPair(a.target,None if a.mode in {"B0","B0-S"} else a.draft,local_files_only=True,dtype=a.dtype)
     is_kv = (a.cache_strategy == "kv_cache") or (a.mode in {"HF", "HF-Assisted"})
-    biasing_cfg = EvidenceBiasingConfig(adaptive_entropy=not a.no_entropy_gating) if a.mode == "M4" else None
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"no_entropy_gating":a.no_entropy_gating,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
+    enable_biasing = (a.mode == "M4") and (not a.no_biasing) and (a.beta0 > 0.0)
+    biasing_cfg = EvidenceBiasingConfig(
+        boost_weight=0.0 if a.no_biasing else a.beta0,
+        order_decay=a.order_decay,
+        adaptive_entropy=not a.no_entropy_gating,
+        entropy_threshold=a.entropy_threshold,
+        max_boost_cap=a.max_boost_cap,
+    ) if a.mode == "M4" else None
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
     env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None,"git_dirty":None}
     try:
@@ -67,7 +81,7 @@ def main():
     write_json(out/"environment.json",env)
     writer=TraceWriter(out/"round_traces.jsonl",out/"token_traces.jsonl")
     canonical=[]; trial_rows=[]
-    common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg}
+    common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg,"enable_biasing":enable_biasing}
     if a.global_warmup > 0:
         wrow = rows[0]
         wev = [e.get("text","") for e in wrow.get("evidence",[])]

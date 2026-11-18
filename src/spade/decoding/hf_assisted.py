@@ -71,7 +71,8 @@ class QwenPair:
                  cache_strategy: str = "recompute",
                  dynamic_k: bool = False,
                  dynamic_k_config: DynamicKConfig | None = None,
-                 biasing_config: EvidenceBiasingConfig | None = None) -> Generation:
+                 biasing_config: EvidenceBiasingConfig | None = None,
+                 enable_biasing: bool = True) -> Generation:
         """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4", "HF", "HF-Assisted"}:
             raise ValueError(f"Unsupported mode {mode}")
@@ -224,7 +225,8 @@ class QwenPair:
                     target_eos=target_eos, run_id=run_id, claim_id=claim_id,
                     evidence_texts=evidence_texts, dynamic_k=dynamic_k,
                     dynamic_k_config=dynamic_k_config,
-                    biasing_config=biasing_config
+                    biasing_config=biasing_config,
+                    enable_biasing=enable_biasing,
                 )
             except Exception:
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
@@ -236,7 +238,9 @@ class QwenPair:
             top_p=top_p, generator=generator, target_device=target_device,
             target_eos=target_eos, run_id=run_id, claim_id=claim_id,
             evidence_texts=evidence_texts, dynamic_k=dynamic_k,
-            dynamic_k_config=dynamic_k_config
+            dynamic_k_config=dynamic_k_config,
+            biasing_config=biasing_config,
+            enable_biasing=enable_biasing,
         )
 
     def _generate_recompute(self, prompt_ids: list[int], mode: str, max_new_tokens: int,
@@ -245,7 +249,9 @@ class QwenPair:
                             target_eos: int | None, run_id: str, claim_id: str,
                             evidence_texts: list[str] | None,
                             dynamic_k: bool = False,
-                            dynamic_k_config: DynamicKConfig | None = None) -> Generation:
+                            dynamic_k_config: DynamicKConfig | None = None,
+                            biasing_config: EvidenceBiasingConfig | None = None,
+                            enable_biasing: bool = True) -> Generation:
         generated = []
         round_rows = []
         token_rows = []
@@ -307,8 +313,8 @@ class QwenPair:
                     qlogits = first_qlogits
                 else:
                     qlogits = self._logits(self.draft, draft_prefix, draft_device)
-                if mode == "M4" and evidence_indexer is not None:
-                    qlogits = apply_evidence_bias(qlogits, evidence_indexer, draft_prefix)
+                if mode == "M4" and enable_biasing and evidence_indexer is not None and (biasing_config is None or biasing_config.boost_weight > 0.0):
+                    qlogits = apply_evidence_bias(qlogits, evidence_indexer, draft_prefix, config=biasing_config)
                 q = processed_distribution(qlogits, temperature, top_k, top_p)
                 token = int(torch.argmax(q).item()) if mode == "B1" else sample_distribution(q, generator)
                 proposed.append(token)
@@ -424,7 +430,8 @@ class QwenPair:
                            evidence_texts: list[str] | None,
                            dynamic_k: bool = False,
                            dynamic_k_config: DynamicKConfig | None = None,
-                           biasing_config: EvidenceBiasingConfig | None = None) -> Generation:
+                           biasing_config: EvidenceBiasingConfig | None = None,
+                           enable_biasing: bool = True) -> Generation:
         """KV-cache accelerated generation with rollback on rejection."""
         generated = []
         round_rows = []
@@ -518,7 +525,7 @@ class QwenPair:
 
             for idx in range(count):
                 logits_to_process = cur_draft_logits
-                if mode == "M4" and evidence_indexer is not None:
+                if mode == "M4" and enable_biasing and evidence_indexer is not None and (biasing_config is None or biasing_config.boost_weight > 0.0):
                     context_now = prompt_ids + generated + proposed
                     logits_to_process = apply_evidence_bias(cur_draft_logits, evidence_indexer, context_now, config=biasing_config)
                 q = processed_distribution(logits_to_process, temperature, top_k, top_p)

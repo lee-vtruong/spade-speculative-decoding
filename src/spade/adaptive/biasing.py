@@ -44,8 +44,11 @@ def apply_evidence_bias(
     if config is None:
         config = EvidenceBiasingConfig()
 
+    if config.boost_weight <= 0.0:
+        return draft_logits
+
     candidates, matched_order = evidence_indexer.get_candidate_tokens(context_tokens)
-    if not candidates and not evidence_indexer.evidence_token_set:
+    if not candidates:
         return draft_logits
 
     biased_logits = draft_logits.clone()
@@ -56,12 +59,12 @@ def apply_evidence_bias(
         h = compute_entropy(draft_logits)
         # When drafter is uncertain (high entropy), boost evidence grounding
         # When drafter is confident (low entropy), reduce intervention
-        gating = 1.0 / (1.0 + math.exp(- (h - config.entropy_threshold)))
+        gating = 1.0 / (1.0 + math.exp(-(h - config.entropy_threshold)))
 
-    # 1. Boost exact n-gram continuation tokens
-    if candidates:
-        order_factor = 1.0 + config.order_decay * (matched_order - 1)
-        boost_val = min(config.max_boost_cap, config.boost_weight * order_factor * gating)
+    # Boost exact n-gram continuation tokens
+    order_factor = 1.0 + config.order_decay * (matched_order - 1)
+    boost_val = min(config.max_boost_cap, config.boost_weight * order_factor * gating)
+    if boost_val > 0.0:
         cand_tensor = torch.as_tensor(tuple(candidates), dtype=torch.long, device=draft_logits.device)
         biased_logits[cand_tensor] += boost_val
 
