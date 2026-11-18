@@ -109,6 +109,8 @@ class StaticDraftRunner:
         "cudagraph_static",
     )
 
+    FLEX_BLOCK_SIZE = 128
+
     def __init__(
         self,
         model: Any,
@@ -117,6 +119,7 @@ class StaticDraftRunner:
         mode: str = "eager_static",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        use_flex_block_mask: bool | None = None,
     ) -> None:
         if mode not in self.VALID_MODES:
             raise ValueError(f"Unsupported mode={mode!r}; expected one of {self.VALID_MODES}")
@@ -129,6 +132,16 @@ class StaticDraftRunner:
         self.device = device or self._infer_device(model)
         self.dtype = dtype or self._infer_dtype(model)
         self._supports_l2k = _supports_logits_to_keep(model)
+        attn_impl = getattr(model.config, "_attn_implementation", None)
+        self.use_flex_block_mask = (
+            bool(use_flex_block_mask)
+            if use_flex_block_mask is not None
+            else (attn_impl == "flex_attention")
+        )
+        if self.use_flex_block_mask and (self.max_cache_len % self.FLEX_BLOCK_SIZE != 0):
+            raise ValueError(
+                f"max_cache_len={self.max_cache_len} must be divisible by {self.FLEX_BLOCK_SIZE} for flex_attention BlockMask"
+            )
         self.cur_len = 0
         self.setup_timings = RunnerSetupTimings(mode=mode, max_cache_len=self.max_cache_len)
 
@@ -153,6 +166,31 @@ class StaticDraftRunner:
         self._kv_arange = torch.arange(self.max_cache_len, dtype=torch.long, device=self.device).view(1, 1, 1, -1)
         self._mask_zero = torch.tensor(0.0, dtype=self.dtype, device=self.device)
         self._mask_neg = torch.tensor(torch.finfo(self.dtype).min, dtype=self.dtype, device=self.device)
+        self._flex_kv_num_blocks: torch.Tensor | None = None
+        self._flex_decode_bm: Any = None
+        if self.use_flex_block_mask:
+            from torch.nn.attention.flex_attention import BlockMask
+
+            num_kv_blocks = self.max_cache_len // self.FLEX_BLOCK_SIZE
+            self._flex_kv_num_blocks = torch.ones((1, 1, 1), dtype=torch.int32, device=self.device)
+            kv_indices = torch.arange(num_kv_blocks, dtype=torch.int32, device=self.device).view(1, 1, 1, -1).contiguous()
+            # For Q_LEN=1 < BLOCK_SIZE=128, full_kv_num_blocks MUST remain 0; all active KV blocks live in kv_num_blocks.
+            full_kv_num_blocks = torch.zeros((1, 1, 1), dtype=torch.int32, device=self.device)
+            full_kv_indices = kv_indices.clone()
+            cpos_ref = self._static_cache_position
+
+            def _decode_mask_mod(b, h, q_idx, kv_idx):
+                return kv_idx <= cpos_ref[0]
+
+            self._flex_decode_bm = BlockMask.from_kv_blocks(
+                kv_num_blocks=self._flex_kv_num_blocks,
+                kv_indices=kv_indices,
+                full_kv_num_blocks=full_kv_num_blocks,
+                full_kv_indices=full_kv_indices,
+                BLOCK_SIZE=self.FLEX_BLOCK_SIZE,
+                mask_mod=_decode_mask_mod,
+                seq_lengths=(1, self.max_cache_len),
+            )
         self._static_logits_out: torch.Tensor | None = None
         self._graph: Any = None
         self._compiled_step: Any = None
@@ -178,20 +216,29 @@ class StaticDraftRunner:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
+    def _update_step_pos(self, pos: int) -> None:
+        self._static_cache_position.fill_(pos)
+        self._static_position_ids.fill_(pos)
+        if self._flex_kv_num_blocks is not None:
+            self._flex_kv_num_blocks.fill_((pos // self.FLEX_BLOCK_SIZE) + 1)
+
     def _raw_step(
         self,
         input_ids: torch.Tensor,
         cache_position: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        causal_mask = torch.where(
-            self._kv_arange <= cache_position.view(1, 1, 1, 1),
-            self._mask_zero,
-            self._mask_neg,
-        )
+        if self.use_flex_block_mask:
+            attn_mask: Any = self._flex_decode_bm
+        else:
+            attn_mask = torch.where(
+                self._kv_arange <= cache_position.view(1, 1, 1, 1),
+                self._mask_zero,
+                self._mask_neg,
+            )
         kwargs: dict[str, Any] = {
             "input_ids": input_ids,
-            "attention_mask": causal_mask,
+            "attention_mask": attn_mask,
             "past_key_values": self.cache,
             "cache_position": cache_position,
             "position_ids": position_ids,
@@ -211,9 +258,9 @@ class StaticDraftRunner:
             return self.setup_timings
 
         self.cache.reset()
+        self._set_static_cache_len(0)
         self._static_input_ids.fill_(0)
-        self._static_cache_position.fill_(0)
-        self._static_position_ids.fill_(0)
+        self._update_step_pos(0)
 
         if self.mode in {"compile_default", "compile_reduce_overhead"}:
             compile_mode = "default" if self.mode == "compile_default" else "reduce-overhead"
@@ -232,8 +279,7 @@ class StaticDraftRunner:
             t_w0 = time.perf_counter()
             with torch.inference_mode():
                 for i in range(1, max(2, warmup_steps) + 1):
-                    self._static_cache_position.fill_(i)
-                    self._static_position_ids.fill_(i)
+                    self._update_step_pos(i)
                     _ = self._compiled_step(
                         self._static_input_ids,
                         self._static_cache_position,
@@ -251,8 +297,7 @@ class StaticDraftRunner:
             with torch.cuda.stream(stream):
                 with torch.inference_mode():
                     for i in range(max(3, warmup_steps)):
-                        self._static_cache_position.fill_(i)
-                        self._static_position_ids.fill_(i)
+                        self._update_step_pos(i)
                         _ = self._raw_step(
                             self._static_input_ids,
                             self._static_cache_position,
@@ -264,8 +309,7 @@ class StaticDraftRunner:
 
             t_g0 = time.perf_counter()
             self._graph = torch.cuda.CUDAGraph()
-            self._static_cache_position.fill_(max(3, warmup_steps))
-            self._static_position_ids.fill_(max(3, warmup_steps))
+            self._update_step_pos(max(3, warmup_steps))
             with torch.inference_mode():
                 with torch.cuda.graph(self._graph):
                     self._static_logits_out = self._raw_step(
@@ -281,8 +325,7 @@ class StaticDraftRunner:
             t_w0 = time.perf_counter()
             with torch.inference_mode():
                 for i in range(max(2, warmup_steps)):
-                    self._static_cache_position.fill_(i)
-                    self._static_position_ids.fill_(i)
+                    self._update_step_pos(i)
                     _ = self._raw_step(
                         self._static_input_ids,
                         self._static_cache_position,
@@ -318,6 +361,17 @@ class StaticDraftRunner:
             "position_ids": pos_ids,
             "use_cache": True,
         }
+        if self.use_flex_block_mask:
+            from torch.nn.attention.flex_attention import create_block_mask
+
+            kwargs["attention_mask"] = create_block_mask(
+                lambda b, h, q_idx, kv_idx: kv_idx <= q_idx,
+                B=1,
+                H=None,
+                Q_LEN=p_len,
+                KV_LEN=self.max_cache_len,
+                device=self.device,
+            )
         if self._supports_l2k:
             kwargs["logits_to_keep"] = 1
         with torch.inference_mode():
@@ -333,8 +387,7 @@ class StaticDraftRunner:
             raise ValueError(f"StaticCache overflow: cur_len={self.cur_len} >= max_cache_len={self.max_cache_len}")
         pos = self.cur_len
         self._static_input_ids[0, 0] = int(token_id)
-        self._static_cache_position[0] = pos
-        self._static_position_ids[0, 0] = pos
+        self._update_step_pos(pos)
 
         with torch.inference_mode():
             if self.mode == "cudagraph_static":
