@@ -112,7 +112,13 @@ def test_target_prefill_attention_hook_matches_output_attentions_exact():
     with TargetPrefillAttentionHook(model, layer_indices=layer_subset, tail_window=tail_w) as hook:
         with torch.inference_mode():
             out = model(input_ids=inp, use_cache=True)
+        for l_idx in layer_subset:
+            for t in hook._captured[l_idx]:
+                assert t.untyped_storage().nbytes() == t.numel() * t.element_size(), (
+                    "Captured tail slice must be cloned so full-sequence hidden states are not retained in VRAM"
+                )
         got_imp, elapsed = hook.compute_token_importance(out.past_key_values, layer_subset=layer_subset)
+    assert not hook._captured, "TargetPrefillAttentionHook must clear captured tensors on __exit__"
 
     assert elapsed >= 0.0
     assert got_imp.shape == ref_imp.shape

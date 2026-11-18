@@ -558,7 +558,7 @@ class QwenPair:
         evidence_indexer = EvidenceIndexer(self.target_tokenizer, evidence_texts) if (mode == "M4" and evidence_texts) else None
         dynamic_k_controller = DynamicKController(dynamic_k_config) if dynamic_k else None
 
-        # Target prefill (always on full target prompt_ids; optionally hooks tail queries for zero-extra-pass selection)
+        # Target prefill (always on full target prompt_ids; optionally hooks tail queries only when evidence exceeds budget)
         use_target_attn_sel = (
             target_attn_selector_cfg is not None
             and self.draft is not None
@@ -566,6 +566,18 @@ class QwenPair:
             and serialized_prompt is not None
             and prompt_offsets is not None
         )
+        attn_needs_hook = False
+        attn_row_meta: dict[str, Any] | None = None
+        attn_ev_list: list[dict[str, Any]] = []
+        attn_budget_chars = 10000
+        if use_target_attn_sel:
+            assert target_attn_selector_cfg is not None
+            attn_row_meta = target_attn_selector_cfg["row"]
+            attn_budget_chars = int(target_attn_selector_cfg.get("budget_chars", 10000))
+            attn_ev_list = list(attn_row_meta.get("evidence") or [])
+            attn_full_chars = sum(len(str(e.get("text", ""))) for e in attn_ev_list)
+            attn_needs_hook = bool(attn_ev_list) and (attn_full_chars > attn_budget_chars)
+
         self._sync(target_device)
         t0 = time.perf_counter()
         inp = torch.tensor([prompt_ids], dtype=torch.long, device=target_device)
@@ -573,8 +585,8 @@ class QwenPair:
         if self._supports_logits_to_keep(self.target):
             target_prefill_kwargs["logits_to_keep"] = 1
 
-        if use_target_attn_sel:
-            assert target_attn_selector_cfg is not None
+        if attn_needs_hook:
+            assert target_attn_selector_cfg is not None and attn_row_meta is not None
             tail_window = int(target_attn_selector_cfg.get("tail_window", 16))
             layer_indices = target_attn_selector_cfg.get("layer_indices", None)
             with TargetPrefillAttentionHook(self.target, layer_indices=layer_indices, tail_window=tail_window) as attn_hook:
@@ -592,31 +604,18 @@ class QwenPair:
 
                 # Strictly timed post-prefill target-attention selection (pre-synced, includes GPU matmul + spans + draft tokenization)
                 sel_t0 = time.perf_counter()
-                row_meta = target_attn_selector_cfg["row"]
-                budget_chars = int(target_attn_selector_cfg.get("budget_chars", 10000))
-                ev_list = list(row_meta.get("evidence") or [])
-                full_chars = sum(len(str(e.get("text", ""))) for e in ev_list)
-                if full_chars <= budget_chars or not ev_list:
-                    attn_dctx = build_draft_context_from_scores(
-                        row_meta,
-                        policy="sentence_budget",
-                        sentence_scores_by_passage=None,
-                        budget_chars=budget_chars,
-                    )
-                    draft_base_ids = prompt_ids
-                else:
-                    imp, _ = attn_hook.compute_token_importance(target_cache_mgr.past_key_values)
-                    spans = find_evidence_and_sentence_token_spans(serialized_prompt, ev_list, prompt_offsets)
-                    _, s_scores = score_evidence_from_token_importance(imp, spans)
-                    attn_dctx = build_draft_context_from_scores(
-                        row_meta,
-                        policy="sentence_budget",
-                        sentence_scores_by_passage=s_scores,
-                        budget_chars=budget_chars,
-                    )
-                    dtok = self.draft_tokenizer or self.target_tokenizer
-                    ser_d = format_qwen_prompt(dtok, attn_dctx.draft_prompt)
-                    draft_base_ids = dtok(ser_d, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
+                imp, _ = attn_hook.compute_token_importance(target_cache_mgr.past_key_values)
+                spans = find_evidence_and_sentence_token_spans(serialized_prompt, attn_ev_list, prompt_offsets)
+                _, s_scores = score_evidence_from_token_importance(imp, spans)
+                attn_dctx = build_draft_context_from_scores(
+                    attn_row_meta,
+                    policy="sentence_budget",
+                    sentence_scores_by_passage=s_scores,
+                    budget_chars=attn_budget_chars,
+                )
+                dtok = self.draft_tokenizer or self.target_tokenizer
+                ser_d = format_qwen_prompt(dtok, attn_dctx.draft_prompt)
+                draft_base_ids = dtok(ser_d, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
                 if draft_runner is not None and len(draft_base_ids) + max_new_tokens >= draft_runner.max_cache_len:
                     max_allowed = max(64, draft_runner.max_cache_len - max_new_tokens - 8)
                     draft_base_ids = draft_base_ids[:max_allowed]
@@ -634,6 +633,20 @@ class QwenPair:
             timings["target_kv_prefill_bytes"] = float(target_kv_prefill_bytes)
             next_target_logits = out.logits[0, -1].float()
             del out, inp
+            if use_target_attn_sel and attn_row_meta is not None:
+                sel_t0 = time.perf_counter()
+                attn_dctx = build_draft_context_from_scores(
+                    attn_row_meta,
+                    policy="sentence_budget",
+                    sentence_scores_by_passage=None,
+                    budget_chars=attn_budget_chars,
+                )
+                draft_base_ids = prompt_ids
+                if draft_runner is not None and len(draft_base_ids) + max_new_tokens >= draft_runner.max_cache_len:
+                    max_allowed = max(64, draft_runner.max_cache_len - max_new_tokens - 8)
+                    draft_base_ids = draft_base_ids[:max_allowed]
+                timings["context_selection_s"] = time.perf_counter() - sel_t0
+                timings["draft_prompt_tokens"] = float(len(draft_base_ids))
 
         # Draft prefill (on draft_base_ids — may be shorter/selective than target prompt_ids)
         peak_draft_kv_bytes = 0

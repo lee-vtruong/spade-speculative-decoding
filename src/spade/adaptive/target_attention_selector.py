@@ -170,9 +170,9 @@ class TargetPrefillAttentionHook:
                 w = min(self.tail_window, int(h.shape[1]))
                 cos, sin = pos_emb
                 self._captured[_l] = (
-                    h[:, -w:, :].detach(),
-                    cos[:, -w:, :].detach(),
-                    sin[:, -w:, :].detach(),
+                    h[:, -w:, :].detach().clone(),
+                    cos[:, -w:, :].detach().clone(),
+                    sin[:, -w:, :].detach().clone(),
                 )
 
             self._handles.append(attn_mod.register_forward_pre_hook(_pre_hook, with_kwargs=True))
@@ -182,6 +182,7 @@ class TargetPrefillAttentionHook:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+        self._captured.clear()
 
     @torch.inference_mode()
     def compute_token_importance(
