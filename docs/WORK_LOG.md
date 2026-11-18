@@ -36,3 +36,25 @@
 
 ### 5. Manuscript Policy
 - `docs/paper/` was **NOT modified**. No new speedup claims or paper edits will be made until real GPU results from the sensitivity study and held-out ablation are collected and audited.
+
+---
+
+## 2026-11-18 (Phase 2) — Sensitivity Study Results & M4.1 Distribution-Level Evidence Biasing Audit
+
+### 1. Summary of Sensitivity Study Findings (`sens-k4-tune100`, Commit `2fa8cdd`, 12/12 `PASS`)
+- Raw trace reconciliation of `unified-v2` passed 5/5 runs (`outputs/analysis/unified_v2_raw_audit.json`).
+- Across $\beta_0 \in \{0.0, 0.25, 0.5, 1.0, 1.5, 2.0\}$ on `pilot100` ($K=4$):
+  - **Static biasing (`--no-entropy-gating`):** monotonically degrades $\alpha_{\text{ev}}$ at $\beta_0 \ge 1.0$ (`79.65% -> 78.96% -> 78.54% -> 78.07%`, $-1.58\text{ pp}$ at $\beta_0=2.0$, $p=0.073$).
+  - **Entropy-gated biasing:** avoids high-$\beta_0$ degradation ($\alpha_{\text{ev}}$ peaks at `80.11%` at $\beta_0=0.5$, $\alpha_{\text{eval}}$ peaks at `82.74%` at $\beta_0=1.5$), but every non-zero $\beta_0$ yields a small effect whose claim-clustered 95% CI crosses zero, and E2E throughput remains within GPU clock jitter (`25.94–26.37 tok/s`).
+- **Decision:** Hold off on running the 393-claim held-out ablation. Execute **M4.1 — Distribution-Level Evidence Biasing Audit** first to diagnose *why* biasing lift is tiny at the $(p, q_{\text{base}}, q_{\text{biased}})$ level.
+
+### 2. M4.1 Implementation (Read-Only Replay + Claim-Clustered Offline Audit)
+- `src/spade/analysis/distribution_audit.py`: Computes exact `TV(p, q_base)`, `TV(p, q_biased)`, `JS(p, q_base)`, `JS(p, q_biased)`, exact per-prefix expected acceptance $1 - \operatorname{TV}(p, q) = \sum_v \min(p(v), q(v))$, target/draft probability mass on evidence candidates $p(S_E)$ vs $q(S_E)$, mass deficit $p(S_E) - q_{\text{base}}(S_E)$, draft entropy, gating value, n-gram match order, candidate count, and microsecond biasing overhead.
+- `scripts/run_distribution_audit.py`: Replays fixed teacher-forced prefixes from read-only `outputs/runs/unified-v2-b0s-lim100/predictions.jsonl` on `pilot100` in one batched forward pass per model per claim (never overwrites existing `unified-v2` or sensitivity outputs).
+- `scripts/analyze_distribution_audit.py`: CPU-only analysis computing claim-clustered paired bootstrap ($B=10{,}000$, strictly by `claim_id`, never independent token samples), answering all 5 core audit questions, strictly separating per-prefix expected acceptance ($1-\operatorname{TV}$) from observed stochastic acceptance, and rendering 5 real-data diagnostic PNG figures.
+
+### 3. Pre-Registered Decision Criteria (Keep vs. Modify vs. Drop Evidence Biasing)
+- **KEEP (`KEEP_CURRENT_BIASING`):** All-prefix $\Delta(1 - \operatorname{TV}) \ge +1.0\text{ pp}$ with claim-clustered 95% CI strictly $> 0$ AND expected round-time savings exceed measured biasing overhead.
+- **MODIFY (`TARGETED_MODIFICATION_CANDIDATE`, max 1–2 changes):** Overall lift $< +1.0\text{ pp}$, BUT audit identifies a concrete failure regime (e.g., `order=1` unigram matches or large $|S_E|$ with $p(S_E) \approx 0$) AND a clean positive regime achieving $\ge +0.50\text{ pp}$ lift (95% CI $> 0$).
+- **DROP / REFRAME (`DROP_OR_REFRAME_AS_NEGATIVE_RESULT`):** Neither overall nor any clean subgroup achieves $\ge +0.50\text{ pp}$ with 95% CI $> 0$, or biasing overhead exceeds theoretical maximum round savings. No new algorithm implemented prior to running M4.1 on GPU.
+
