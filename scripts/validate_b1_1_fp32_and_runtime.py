@@ -393,7 +393,7 @@ def run_workstream_3_fp32_audit(
 ) -> dict[str, Any]:
     """Workstream 3: Comprehensive 4-part FP32 distribution processing validation."""
     device = target_model.get_input_embeddings().weight.device
-    rows = [json.loads(l) for l in source_jsonl.read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = [json.loads(l) for l in source_jsonl.read_text(encoding="utf-8").split("\n") if l.strip()]
 
     # ---- (3a) & (3c): Real raw logits (target 8B + draft 0.6B) from 15 real claims (~1,200+ prefixes) ----
     # Generate reference tokens first with target+draft B2 orig_fp64 on 15 claims, AND collect exact logits!
