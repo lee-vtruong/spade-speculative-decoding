@@ -37,7 +37,11 @@ def _extract_m4_2_claim_map(run_dir: Path) -> dict[str, dict[str, Any]]:
         sel_s = float(t.get("context_selection_s", 0.0))
         p_pref_s = float(t.get("prompt_prefill_s", 0.0))
         d_pref_s = float(t.get("draft_prefill_s", 0.0))
+        d_dec_s = float(t.get("draft_generation_s", 0.0))
+        ver_s = float(t.get("target_verification_s", 0.0))
+        corr_s = float(t.get("correction_s", 0.0))
         dec_s = float(t.get("decode_s", 0.0))
+        unattr_dec_s = dec_s - (d_dec_s + ver_s + corr_s)
         claims[cid] = {
             "claim_id": cid,
             "output_tokens": int(t.get("output_tokens", 0)),
@@ -46,8 +50,10 @@ def _extract_m4_2_claim_map(run_dir: Path) -> dict[str, dict[str, Any]]:
             "context_selection_s": sel_s,
             "prompt_prefill_s": p_pref_s,
             "draft_prefill_s": d_pref_s,
-            "draft_decode_s": float(t.get("draft_generation_s", 0.0)),
-            "verify_s": float(t.get("target_verification_s", 0.0)),
+            "draft_decode_s": d_dec_s,
+            "verify_s": ver_s,
+            "correction_s": corr_s,
+            "unattributed_decode_s": unattr_dec_s,
             "decode_s": dec_s,
             "e2e_s": sel_s + p_pref_s + d_pref_s + dec_s,
             "draft_kv_prefill_mb": float(t.get("draft_kv_prefill_bytes", 0.0)) / (1024.0 * 1024.0),
@@ -190,9 +196,12 @@ def analyze_m4_2(
         mean_t_tok = sum(c["target_prompt_tokens"] for c in c_list) / n_c if n_c else 0.0
         mean_d_tok = sum(c["draft_prompt_tokens"] for c in c_list) / n_c if n_c else 0.0
         mean_sel_ms = (sum(c["context_selection_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
+        mean_t_pref_ms = (sum(c["prompt_prefill_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
         mean_d_pref_ms = (sum(c["draft_prefill_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
         mean_d_dec_ms_claim = (sum(c["draft_decode_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
         mean_verify_ms_claim = (sum(c["verify_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
+        mean_corr_ms_claim = (sum(c["correction_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
+        mean_unattr_ms_claim = (sum(c["unattributed_decode_s"] for c in c_list) * 1000.0) / n_c if n_c else 0.0
         mean_kv_pref_mb = sum(c["draft_kv_prefill_mb"] for c in c_list) / n_c if n_c else 0.0
         mean_kv_peak_mb = sum(c["draft_kv_peak_mb"] for c in c_list) / n_c if n_c else 0.0
         mean_t_kv_peak_mb = sum(c["target_kv_peak_mb"] for c in c_list) / n_c if n_c else 0.0
@@ -205,9 +214,13 @@ def analyze_m4_2(
             "mean_draft_prompt_tokens": round(mean_d_tok, 1),
             "prompt_compression_pct": round((1.0 - mean_d_tok / mean_t_tok) * 100.0, 2) if mean_t_tok > 0 else 0.0,
             "context_selection_ms_per_claim": round(mean_sel_ms, 3),
+            "target_prefill_ms_per_claim": round(mean_t_pref_ms, 2),
             "draft_prefill_ms_per_claim": round(mean_d_pref_ms, 2),
             "draft_decode_ms_per_claim": round(mean_d_dec_ms_claim, 2),
             "verify_ms_per_claim": round(mean_verify_ms_claim, 2),
+            "correction_ms_per_claim": round(mean_corr_ms_claim, 2),
+            "unattributed_decode_ms_per_claim": round(mean_unattr_ms_claim, 2),
+            "unattributed_decode_ms_per_round": round((sum(c["unattributed_decode_s"] for c in c_list) * 1000.0) / total_rounds, 2) if total_rounds else 0.0,
             "draft_kv_prefill_mb": round(mean_kv_pref_mb, 3),
             "draft_kv_peak_mb": round(mean_kv_peak_mb, 3),
             "target_kv_peak_mb": round(mean_t_kv_peak_mb, 3),
@@ -303,12 +316,26 @@ def analyze_m4_2(
                 "metrics": per_m,
             })
 
-            draft_saved_ms = (base_r["draft_prefill_ms_per_claim"] + base_r["draft_decode_ms_per_claim"]) - (
-                tr["draft_prefill_ms_per_claim"] + tr["draft_decode_ms_per_claim"]
-            )
+            target_prefill_delta_ms = tr["target_prefill_ms_per_claim"] - base_r["target_prefill_ms_per_claim"]
+            draft_prefill_delta_ms = tr["draft_prefill_ms_per_claim"] - base_r["draft_prefill_ms_per_claim"]
+            draft_decode_delta_ms = tr["draft_decode_ms_per_claim"] - base_r["draft_decode_ms_per_claim"]
+            draft_saved_ms = -(draft_prefill_delta_ms + draft_decode_delta_ms)
             extra_verify_cost_ms = tr["verify_ms_per_claim"] - base_r["verify_ms_per_claim"]
+            correction_delta_ms = tr["correction_ms_per_claim"] - base_r["correction_ms_per_claim"]
+            unattributed_decode_delta_ms = tr["unattributed_decode_ms_per_claim"] - base_r["unattributed_decode_ms_per_claim"]
             selection_cost_ms = tr["context_selection_ms_per_claim"] - base_r["context_selection_ms_per_claim"]
-            net_e2e_saved_ms = base_r["e2e_incl_sel_ms_per_claim"] - tr["e2e_incl_sel_ms_per_claim"]
+            net_e2e_delta_ms = tr["e2e_incl_sel_ms_per_claim"] - base_r["e2e_incl_sel_ms_per_claim"]
+            net_e2e_saved_ms = -net_e2e_delta_ms
+            accounting_sum_delta_ms = (
+                target_prefill_delta_ms
+                + draft_prefill_delta_ms
+                + draft_decode_delta_ms
+                + extra_verify_cost_ms
+                + correction_delta_ms
+                + unattributed_decode_delta_ms
+                + selection_cost_ms
+            )
+            accounting_residual_ms = net_e2e_delta_ms - accounting_sum_delta_ms
             tp_boot = per_m["throughput_e2e_tok_s"]
 
             if tp_boot["interpretation"] == "positive_ci_excludes_zero" and net_e2e_saved_ms > 0:
@@ -321,10 +348,17 @@ def analyze_m4_2(
             break_even.append({
                 "policy": pol,
                 "label": tr["label"],
+                "target_prefill_delta_ms_per_claim": round(target_prefill_delta_ms, 2),
+                "draft_prefill_delta_ms_per_claim": round(draft_prefill_delta_ms, 2),
+                "draft_decode_delta_ms_per_claim": round(draft_decode_delta_ms, 2),
                 "draft_compute_saved_ms_per_claim": round(draft_saved_ms, 2),
                 "extra_verify_cost_ms_per_claim": round(extra_verify_cost_ms, 2),
+                "correction_delta_ms_per_claim": round(correction_delta_ms, 2),
+                "unattributed_decode_delta_ms_per_claim": round(unattributed_decode_delta_ms, 2),
                 "context_selection_cost_ms_per_claim": round(selection_cost_ms, 3),
+                "net_e2e_delta_ms_per_claim": round(net_e2e_delta_ms, 2),
                 "net_e2e_saved_ms_per_claim": round(net_e2e_saved_ms, 2),
+                "accounting_residual_ms_per_claim": round(accounting_residual_ms, 3),
                 "delta_e2e_throughput_tok_s": tp_boot["delta"],
                 "delta_e2e_throughput_ci95": [tp_boot["ci_95_low"], tp_boot["ci_95_high"]],
                 "p_value_two_sided": tp_boot["p_value_two_sided"],
@@ -395,16 +429,19 @@ def render_markdown(report: dict[str, Any]) -> str:
     if report["break_even_evaluation"]:
         lines.extend([
             "",
-            "## 3. Break-Even Decision Check (Draft Savings vs. Rejection & Selection Cost)",
+            "## 3. Break-Even Decision Check (100% Additive E2E Decomposition, ms/claim)",
             "",
-            "| Policy | Draft Compute Saved (ms/claim) | Extra Verify Cost (ms/claim) | Selection Cost (ms/claim) | Net E2E Saved (ms/claim) | $\\Delta$ E2E tok/s (95% CI, $p$) | Verdict |",
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+            "| Policy | $\\Delta$ Tgt Prefill | $\\Delta$ Draft Prefill | $\\Delta$ Draft Dec | $\\Delta$ Verify | $\\Delta$ Corr | $\\Delta$ Target Dist/Loop | $\\Delta$ Sel | Net $\\Delta$ E2E | Residual | $\\Delta$ E2E tok/s (95% CI, $p$) | Verdict |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ])
         for b in report["break_even_evaluation"]:
             lines.append(
-                f"| {b['label']} | {b['draft_compute_saved_ms_per_claim']:+.2f} | "
-                f"{b['extra_verify_cost_ms_per_claim']:+.2f} | {b['context_selection_cost_ms_per_claim']:+.3f} | "
-                f"{b['net_e2e_saved_ms_per_claim']:+.2f} | {b['delta_e2e_throughput_tok_s']:+.3f} "
+                f"| {b['label']} | {b['target_prefill_delta_ms_per_claim']:+.2f} | "
+                f"{b['draft_prefill_delta_ms_per_claim']:+.2f} | {b['draft_decode_delta_ms_per_claim']:+.2f} | "
+                f"{b['extra_verify_cost_ms_per_claim']:+.2f} | {b['correction_delta_ms_per_claim']:+.2f} | "
+                f"{b['unattributed_decode_delta_ms_per_claim']:+.2f} | {b['context_selection_cost_ms_per_claim']:+.3f} | "
+                f"**{b['net_e2e_delta_ms_per_claim']:+.2f}** | {b['accounting_residual_ms_per_claim']:+.3f} | "
+                f"{b['delta_e2e_throughput_tok_s']:+.3f} "
                 f"(`[{b['delta_e2e_throughput_ci95'][0]:+.3f}, {b['delta_e2e_throughput_ci95'][1]:+.3f}]`, $p={b['p_value_two_sided']:.4f}$) | "
                 f"`{b['break_even_verdict']}` |"
             )

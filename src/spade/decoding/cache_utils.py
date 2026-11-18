@@ -45,13 +45,34 @@ def crop_past_key_values(past_key_values: Any, max_length: int) -> Any:
     if past_key_values is None or max_length < 0:
         return past_key_values
 
-    # Transformers DynamicCache
+    # Transformers DynamicCache (handles <=5.14 positive max_length and >=5.20 negative tokens_to_remove)
     if hasattr(past_key_values, "crop"):
-        try:
-            past_key_values.crop(max_length)
+        cur_len = get_cache_seq_length(past_key_values)
+        if cur_len > max_length:
+            try:
+                past_key_values.crop(max_length)
+                if get_cache_seq_length(past_key_values) == max_length:
+                    return past_key_values
+            except Exception:
+                pass
+            try:
+                past_key_values.crop(-(cur_len - max_length))
+                if get_cache_seq_length(past_key_values) == max_length:
+                    return past_key_values
+            except Exception:
+                pass
+        else:
             return past_key_values
-        except Exception:
-            pass
+
+    # Transformers 5.x DynamicCache.layers direct fallback
+    layers = getattr(past_key_values, "layers", None)
+    if isinstance(layers, (list, tuple)) and layers:
+        for layer in layers:
+            if hasattr(layer, "keys") and isinstance(layer.keys, torch.Tensor) and layer.keys.shape[-2] > max_length:
+                layer.keys = layer.keys[..., :max_length, :]
+            if hasattr(layer, "values") and isinstance(layer.values, torch.Tensor) and layer.values.shape[-2] > max_length:
+                layer.values = layer.values[..., :max_length, :]
+        return past_key_values
 
     # DynamicCache with direct key_cache/value_cache list access
     if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
