@@ -455,25 +455,22 @@ def profile_draft_torch_profiler(
         _sync(device)
     wall_ms_per_step = (time.perf_counter() - t0) * 1000.0 / n_steps
 
-    # Extract CUDA kernel totals & top operators
+    # Extract CUDA kernel totals (leaf GPU kernels only where self_cpu_time_total == 0 to avoid parent+child double-counting)
     key_avgs = prof.key_averages()
-    total_cuda_us = 0.0
-    total_cpu_us = 0.0
+    total_leaf_cuda_us = 0.0
     top_ops: list[dict[str, Any]] = []
     for evt in key_avgs:
         cuda_us = float(getattr(evt, "self_device_time_total", getattr(evt, "self_cuda_time_total", 0.0)))
         cpu_us = float(getattr(evt, "self_cpu_time_total", 0.0))
-        total_cuda_us += cuda_us
-        total_cpu_us += cpu_us
-        if cuda_us > 0:
+        if cuda_us > 0 and cpu_us == 0.0:
+            total_leaf_cuda_us += cuda_us
             top_ops.append({
-                "name": evt.key[:60],
+                "name": evt.key[:65],
                 "calls_per_step": round(evt.count / n_steps, 1),
                 "cuda_ms_per_step": round((cuda_us / 1000.0) / n_steps, 4),
-                "cpu_ms_per_step": round((cpu_us / 1000.0) / n_steps, 4),
             })
     top_ops.sort(key=lambda x: x["cuda_ms_per_step"], reverse=True)
-    cuda_kernel_ms = (total_cuda_us / 1000.0) / n_steps
+    cuda_kernel_ms = (total_leaf_cuda_us / 1000.0) / n_steps
 
     mgr.reset()
     if device.type == "cuda":
@@ -510,6 +507,7 @@ def benchmark_draft_runtime_modes(
 
     # Pre-compute eager_dynamic_cache reference logits & baseline step timings per context
     ref_logits_by_label: dict[str, list[torch.Tensor]] = {}
+    ref_static_logits_by_label: dict[str, list[torch.Tensor]] = {}
     ref_step_tokens_by_label: dict[str, list[int]] = {}
     eager_baseline_ms: dict[str, float] = {}
 
@@ -606,6 +604,8 @@ def benchmark_draft_runtime_modes(
                         "mean_abs_logit_diff": 0.0,
                         "max_tv_diff": 0.0,
                         "post_rollback_max_tv_diff": 0.0,
+                        "max_tv_vs_eager_static": 0.0,
+                        "post_rollback_tv_vs_eager_static": 0.0,
                         "exactness_pass": True,
                     })
                 else:
@@ -617,12 +617,15 @@ def benchmark_draft_runtime_modes(
                     )
                     setup = runner.prepare(warmup_steps=3)
 
-                    # 1) Exactness + rollback check against eager_dynamic_cache
+                    # 1) Exactness + rollback check against eager_dynamic_cache AND eager_static
                     got_logits = [runner.prefill(prompt_ids).clone()]
                     for idx, st_tok in enumerate(step_toks):
                         if idx in rollback_plan:
                             runner.rollback(runner.cur_len - rollback_plan[idx])
                         got_logits.append(runner.step(st_tok).clone())
+
+                    if mode == "eager_static":
+                        ref_static_logits_by_label[label] = [x.clone() for x in got_logits]
 
                     abs_diffs = [
                         float(torch.max(torch.abs(a - b)).item())
@@ -640,6 +643,21 @@ def benchmark_draft_runtime_modes(
                         for a, b in zip(ref_logits, got_logits)
                     ]
                     post_rb_tv = max(tv_diffs[5:]) if len(tv_diffs) > 5 else max(tv_diffs)
+
+                    ref_st = ref_static_logits_by_label.get(label)
+                    if ref_st is not None:
+                        st_tv_diffs = [
+                            total_variation(
+                                processed_distribution(a, temperature=temperature, top_k=0, top_p=top_p),
+                                processed_distribution(b, temperature=temperature, top_k=0, top_p=top_p),
+                            )
+                            for a, b in zip(ref_st, got_logits)
+                        ]
+                        max_tv_st = max(st_tv_diffs)
+                        post_rb_tv_st = max(st_tv_diffs[5:]) if len(st_tv_diffs) > 5 else max_tv_st
+                    else:
+                        max_tv_st = 0.0
+                        post_rb_tv_st = 0.0
 
                     # 2) Steady-state prefill & step latency benchmark (80 steps, strictly post-warmup)
                     _sync(device)
@@ -689,7 +707,9 @@ def benchmark_draft_runtime_modes(
                         "mean_abs_logit_diff": round(statistics.mean(mean_diffs), 6),
                         "max_tv_diff": round(max_tv, 6),
                         "post_rollback_max_tv_diff": round(post_rb_tv, 6),
-                        "exactness_pass": bool(max_tv < 0.01 and post_rb_tv < 0.01),
+                        "max_tv_vs_eager_static": round(max_tv_st, 6),
+                        "post_rollback_tv_vs_eager_static": round(post_rb_tv_st, 6),
+                        "exactness_pass": bool(max_tv_st < 0.01 and post_rb_tv_st < 0.01),
                     })
                     del runner
             except Exception as exc:
@@ -749,7 +769,7 @@ def render_b1_1_markdown(report: dict[str, Any]) -> str:
         "",
         "## 4. Draft Runtime Modes Benchmark (Steady-State vs Setup, Exactness & Peak VRAM)",
         "",
-        "| Context | Mode | MaxCache | Compile (s) | Warmup (s) | Capture (s) | Steady Mean (ms) | Median (ms) | p95 (ms) | 4-Step Draft (ms) | Speedup | Peak VRAM (MB) | Max TV Diff | Post-RB TV | Exact |",
+        "| Context | Mode | MaxCache | Compile (s) | Warmup (s) | Capture (s) | Steady Mean (ms) | Median (ms) | p95 (ms) | 4-Step Draft (ms) | Speedup | Peak VRAM (MB) | TV vs EagerStatic (Post-RB) | TV vs EagerDyn (bf16 SDPA) | Exact |",
         "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ])
     for r in report["runtime_modes"]:
@@ -761,8 +781,8 @@ def render_b1_1_markdown(report: dict[str, Any]) -> str:
             f"{r['compile_s']:.2f} | {r['warmup_s']:.3f} | {r['graph_capture_s']:.3f} | "
             f"**{r['steady_step_mean_ms']:.3f}** | {r['steady_step_median_ms']:.3f} | {r['steady_step_p95_ms']:.3f} | "
             f"**{r['est_4step_draft_ms']:.2f}** | **{r['speedup_vs_eager_dynamic']:.2f}x** | "
-            f"{r['peak_vram_mb']:.0f} | {r['max_tv_diff']:.6f} | {r['post_rollback_max_tv_diff']:.6f} | "
-            f"{'PASS' if r['exactness_pass'] else 'FAIL'} |"
+            f"{r['peak_vram_mb']:.0f} | {r.get('max_tv_vs_eager_static', 0.0):.6f} ({r.get('post_rollback_tv_vs_eager_static', 0.0):.6f}) | "
+            f"{r['max_tv_diff']:.6f} | {'PASS' if r['exactness_pass'] else 'FAIL'} |"
         )
 
     if report.get("context_sensitivity_summary"):
@@ -846,9 +866,9 @@ def main() -> None:
     print("=== [3/3] Benchmarking Draft Runtime Modes (with Qwen3-8B Resident on GPU) ===", flush=True)
     modes = [
         "eager_dynamic_cache",
-        "eager_static_cache",
-        "compile_default_static",
-        "compile_reduce_overhead_static",
+        "eager_static",
+        "compile_default",
+        "compile_reduce_overhead",
         "cudagraph_static",
     ]
     runtime_rows = benchmark_draft_runtime_modes(
@@ -858,7 +878,12 @@ def main() -> None:
         n_steady_steps=args.n_steady_steps,
     )
     for r in runtime_rows:
-        print(f"  {r['context_label']:14s} | {r['mode']:30s} | {r['status']} | step={r.get('steady_step_mean_ms')}ms | speedup={r.get('speedup_vs_eager_dynamic')}x | max_tv={r.get('max_tv_diff')} | err={r.get('error')}", flush=True)
+        print(
+            f"  {r['context_label']:14s} | {r['mode']:24s} | {r['status']} | "
+            f"step={r.get('steady_step_mean_ms')}ms | speedup={r.get('speedup_vs_eager_dynamic')}x | "
+            f"tv_st={r.get('max_tv_vs_eager_static')} | tv_dyn={r.get('max_tv_diff')} | err={r.get('error')}",
+            flush=True,
+        )
 
     # Summarize context-length sensitivity & B1.1 verdict per mode
     by_mode: dict[str, dict[str, dict[str, Any]]] = {}
