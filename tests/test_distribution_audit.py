@@ -286,3 +286,57 @@ def test_claim_clustered_bootstrap_and_full_report_with_figures(tmp_path: Path):
         "## 5. Pre-Registered Decision Gate Evaluation",
     ]:
         assert required_heading in md
+
+
+def test_v2_precision_and_bandpass_gating_filters():
+    from spade.adaptive.biasing import EvidenceBiasingConfig, apply_evidence_bias
+    from spade.analysis.distribution_audit import build_v2_audit_specs
+
+    tok = _MockTokenizer()
+    # "of" has 4 different continuations -> candidate_count=4 at order=1
+    evidence = [
+        "The state of Georgia reported",
+        "of cases",
+        "of 120",
+        "of [E1]",
+    ]
+    indexer = EvidenceIndexer(tok, evidence, max_ngram=4)
+
+    # Context ["of"] -> order=1, 4 candidates -> MUST be filtered by min_match_order=2 AND max_candidates=3
+    mod_logits = torch.zeros(32)
+    mod_logits[13] = 2.0  # moderate entropy (~2.4 nats), strong draft support on 13
+    cfg_prec = EvidenceBiasingConfig(boost_weight=1.5, gating_mode="none", min_match_order=2, max_candidates=3)
+    out_order1 = apply_evidence_bias(mod_logits, indexer, [12], cfg_prec)
+    assert torch.equal(out_order1, mod_logits)
+
+    # Context ["state", "of"] -> order=2, candidate={13} (count=1) -> passes precision filter!
+    out_order2 = apply_evidence_bias(mod_logits, indexer, [11, 12], cfg_prec)
+    assert float(out_order2[13].item()) > float(mod_logits[13].item())
+
+    # Band-pass gate: blocks very low entropy (peaked) and very high entropy (uniform) and low draft mass
+    cfg_bp = EvidenceBiasingConfig(
+        boost_weight=1.5,
+        gating_mode="bandpass",
+        min_match_order=2,
+        max_candidates=3,
+        entropy_low=0.4,
+        entropy_high=2.5,
+        min_draft_mass=0.10,
+    )
+    peaked = torch.zeros(32); peaked[18] = 30.0  # H ~ 0.0 < 0.4
+    assert torch.equal(apply_evidence_bias(peaked, indexer, [11, 12], cfg_bp), peaked)
+
+    uniform = torch.zeros(32)  # H = ln(32) ~ 3.47 > 2.5
+    assert torch.equal(apply_evidence_bias(uniform, indexer, [11, 12], cfg_bp), uniform)
+
+    # Moderate entropy (~1.0 nats) with low draft mass on candidate 13 (< 0.10) -> blocked!
+    low_mass = torch.full((32,), -5.0); low_mass[18] = 2.0; low_mass[19] = 1.5
+    assert torch.equal(apply_evidence_bias(low_mass, indexer, [11, 12], cfg_bp), low_mass)
+
+    # Moderate entropy (~1.0 nats) with solid draft mass on candidate 13 (>= 0.10) -> boosted!
+    good_mass = torch.full((32,), -5.0); good_mass[18] = 2.0; good_mass[13] = 1.5
+    out_bp = apply_evidence_bias(good_mass, indexer, [11, 12], cfg_bp)
+    assert float(out_bp[13].item()) > float(good_mass[13].item())
+
+    assert len(build_v2_audit_specs()) == 18
+

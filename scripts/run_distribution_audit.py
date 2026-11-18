@@ -27,6 +27,7 @@ from spade.adaptive.evidence_indexer import EvidenceIndexer
 from spade.analysis.distribution_audit import (
     AuditBiasSpec,
     build_default_audit_specs,
+    build_v2_audit_specs,
     evaluate_prefix_biasing,
 )
 from spade.decoding.autoregressive import format_qwen_prompt, load_causal_lm, validate_tokenizers
@@ -131,6 +132,8 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top-k", type=int, default=0)
     p.add_argument("--top-p", type=float, default=0.9)
+    p.add_argument("--suite", choices=["v1", "v2"], default="v1",
+                   help="v1: original static/entropy grid; v2: M4.1 targeted precision + band-pass comparison suite")
     p.add_argument("--betas", type=float, nargs="+", default=DEFAULT_BETAS)
     p.add_argument("--variants", nargs="+", choices=["static", "entropy"], default=DEFAULT_VARIANTS)
     p.add_argument("--order-decay", type=float, default=0.5)
@@ -142,13 +145,16 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", default=False)
     args = p.parse_args()
 
-    specs = build_default_audit_specs(
-        betas=args.betas,
-        variants=args.variants,
-        order_decay=args.order_decay,
-        entropy_threshold=args.entropy_threshold,
-        max_boost_cap=args.max_boost_cap,
-    )
+    if args.suite == "v2":
+        specs = build_v2_audit_specs()
+    else:
+        specs = build_default_audit_specs(
+            betas=args.betas,
+            variants=args.variants,
+            order_decay=args.order_decay,
+            entropy_threshold=args.entropy_threshold,
+            max_boost_cap=args.max_boost_cap,
+        )
     if not specs:
         p.error("No positive beta_0 values specified for biasing audit")
 

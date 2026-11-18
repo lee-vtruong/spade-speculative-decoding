@@ -30,9 +30,14 @@ def generate_figures(report: dict[str, Any], records: list[dict[str, Any]], fig_
     saved: list[str] = []
     primary = report["primary_config"]
 
-    # Figure 1: Per-prefix delta expected acceptance (1 - TV) vs beta_0 (static vs entropy)
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=False)
-    for variant, color, marker in [("static", "#d95f02", "o"), ("entropy", "#1b9e77", "s")]:
+    # Figure 1: Per-prefix delta expected acceptance (1 - TV) vs beta_0 across all audited variants
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), sharey=False)
+    palette = ["#d95f02", "#1b9e77", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d", "#386cb0"]
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+    unique_variants = list(dict.fromkeys(s["variant"] for s in report["config_summaries"]))
+    for idx_v, variant in enumerate(unique_variants):
+        color = palette[idx_v % len(palette)]
+        marker = markers[idx_v % len(markers)]
         v_rows = sorted(
             [s for s in report["config_summaries"] if s["variant"] == variant],
             key=lambda x: x["beta0"],
@@ -45,13 +50,13 @@ def generate_figures(report: dict[str, Any], records: list[dict[str, Any]], fig_
         ys_all = [r["delta_expected_acceptance_all_pp"] for r in v_rows]
         lo_all = [max(0.0, r["delta_expected_acceptance_all_pp"] - r["all_delta_expected_acceptance_bootstrap"]["ci_95_low"] * 100.0) for r in v_rows]
         hi_all = [max(0.0, r["all_delta_expected_acceptance_bootstrap"]["ci_95_high"] * 100.0 - r["delta_expected_acceptance_all_pp"]) for r in v_rows]
-        axes[0].errorbar(xs, ys_all, yerr=[lo_all, hi_all], marker=marker, color=color, linewidth=2, capsize=4, label=variant)
+        axes[0].errorbar(xs, ys_all, yerr=[lo_all, hi_all], marker=marker, color=color, linewidth=1.8, capsize=3, label=variant)
 
         # Panel B: Biased prefixes only
         ys_b = [r["delta_expected_acceptance_biased_pp"] for r in v_rows]
         lo_b = [max(0.0, r["delta_expected_acceptance_biased_pp"] - r["biased_delta_expected_acceptance_bootstrap"]["ci_95_low"] * 100.0) for r in v_rows]
         hi_b = [max(0.0, r["biased_delta_expected_acceptance_bootstrap"]["ci_95_high"] * 100.0 - r["delta_expected_acceptance_biased_pp"]) for r in v_rows]
-        axes[1].errorbar(xs, ys_b, yerr=[lo_b, hi_b], marker=marker, color=color, linewidth=2, capsize=4, label=variant)
+        axes[1].errorbar(xs, ys_b, yerr=[lo_b, hi_b], marker=marker, color=color, linewidth=1.8, capsize=3, label=variant)
 
     for ax, title in [(axes[0], "All Fixed Prefixes"), (axes[1], "Biased Prefixes Only")]:
         ax.axhline(0.0, color="#555555", linestyle="--", linewidth=1)

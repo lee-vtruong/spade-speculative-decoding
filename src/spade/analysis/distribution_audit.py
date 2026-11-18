@@ -24,7 +24,12 @@ from typing import Any
 
 import torch
 
-from spade.adaptive.biasing import EvidenceBiasingConfig, apply_evidence_bias, compute_entropy
+from spade.adaptive.biasing import (
+    EvidenceBiasingConfig,
+    apply_evidence_bias,
+    compute_entropy,
+    compute_gating_and_boost,
+)
 from spade.adaptive.evidence_indexer import EvidenceIndexer
 from spade.decoding.sampling import expected_acceptance, processed_distribution, total_variation
 from spade.instrumentation.token_analysis import categorize_token, evidence_overlap
@@ -62,8 +67,74 @@ def build_default_audit_specs(
                 adaptive_entropy=(variant == "entropy"),
                 entropy_threshold=entropy_threshold,
                 max_boost_cap=max_boost_cap,
+                gating_mode="sigmoid" if variant == "entropy" else "none",
             )
             specs.append(AuditBiasSpec(name=f"{variant}-{btag}", variant=variant, beta0=float(b), config=cfg))
+    return specs
+
+
+def build_v2_audit_specs() -> list[AuditBiasSpec]:
+    """Pre-specified M4.1 v2 comparison suite testing the 2 targeted modifications.
+
+    Includes original baselines (orig-entropy-b1p50, orig-static-b0p50) alongside:
+      - Mod 1 only: precision-filtered n-gram matching (min_match_order in {2,3}, max_candidates=3)
+      - Mod 1 + Mod 2: precision-filtered + band-pass entropy [0.4, 2.5] + draft-support mass gate
+    """
+    specs: list[AuditBiasSpec] = [
+        AuditBiasSpec(
+            name="orig-entropy-b1p50",
+            variant="orig_entropy",
+            beta0=1.5,
+            config=EvidenceBiasingConfig(boost_weight=1.5, adaptive_entropy=True, gating_mode="sigmoid"),
+        ),
+        AuditBiasSpec(
+            name="orig-static-b0p50",
+            variant="orig_static",
+            beta0=0.5,
+            config=EvidenceBiasingConfig(boost_weight=0.5, adaptive_entropy=False, gating_mode="none"),
+        ),
+    ]
+    # Mod 1 only: precision-filtered (min_order=2 or 3, max_candidates=3, no entropy gating)
+    for min_ord in (2, 3):
+        for b in (0.5, 1.0, 1.5):
+            btag = f"b{b:.2f}".replace(".", "p")
+            specs.append(AuditBiasSpec(
+                name=f"prec-o{min_ord}-c3-{btag}",
+                variant=f"prec_o{min_ord}_c3",
+                beta0=b,
+                config=EvidenceBiasingConfig(
+                    boost_weight=b,
+                    adaptive_entropy=False,
+                    gating_mode="none",
+                    min_match_order=min_ord,
+                    max_candidates=3,
+                ),
+            ))
+
+    # Mod 1 + Mod 2: precision-filtered + band-pass entropy [0.4, 2.5] + draft support mass gate
+    for min_ord, min_mass, betas in [
+        (2, 0.05, (0.5, 1.0, 1.5, 2.0)),
+        (2, 0.10, (1.0, 1.5, 2.0)),
+        (3, 0.05, (1.0, 1.5, 2.0)),
+    ]:
+        mtag = f"m{int(round(min_mass * 100)):02d}"
+        for b in betas:
+            btag = f"b{b:.2f}".replace(".", "p")
+            specs.append(AuditBiasSpec(
+                name=f"bandpass-o{min_ord}-c3-{mtag}-{btag}",
+                variant=f"bandpass_o{min_ord}_c3_{mtag}",
+                beta0=b,
+                config=EvidenceBiasingConfig(
+                    boost_weight=b,
+                    adaptive_entropy=True,
+                    gating_mode="bandpass",
+                    min_match_order=min_ord,
+                    max_candidates=3,
+                    entropy_low=0.4,
+                    entropy_high=2.5,
+                    min_draft_mass=min_mass,
+                ),
+            ))
     return specs
 
 
@@ -197,12 +268,36 @@ def evaluate_prefix_biasing(
     config_results: dict[str, dict[str, Any]] = {}
     for spec in specs:
         cfg = spec.config
-        if cfg.adaptive_entropy:
-            gating = 1.0 / (1.0 + math.exp(-(entropy_nats - cfg.entropy_threshold)))
-        else:
-            gating = 1.0
+        t0_bias = time.perf_counter()
+        gating, applied_boost, active_cand_tensor = compute_gating_and_boost(d_logits, candidates, matched_order, cfg)
+        if applied_boost > 0.0 and active_cand_tensor is not None:
+            biased_logits = d_logits.clone()
+            biased_logits[active_cand_tensor] += applied_boost
+            bias_us = lookup_us + (time.perf_counter() - t0_bias) * 1e6
 
-        if cand_count == 0 or cfg.boost_weight <= 0.0:
+            q_biased = processed_distribution(biased_logits, temperature=temperature, top_k=top_k, top_p=top_p)
+            tv_biased = total_variation(p, q_biased)
+            exp_acc_biased = expected_acceptance(p, q_biased)
+            js_biased = jensen_shannon_divergence(p, q_biased)
+            draft_biased_mass = float(q_biased[active_cand_tensor].sum().item())
+
+            config_results[spec.name] = {
+                "variant": spec.variant,
+                "beta0": spec.beta0,
+                "is_biased": True,
+                "gating_value": round(gating, 6),
+                "applied_boost": round(applied_boost, 6),
+                "tv_biased": tv_biased,
+                "delta_tv": tv_biased - tv_base,
+                "js_biased": js_biased,
+                "delta_js": js_biased - js_base,
+                "expected_acceptance_biased": exp_acc_biased,
+                "delta_expected_acceptance": exp_acc_biased - exp_acc_base,
+                "draft_biased_mass_on_candidates": draft_biased_mass,
+                "bias_overhead_us": round(bias_us, 3),
+            }
+        else:
+            bias_us = lookup_us + (time.perf_counter() - t0_bias) * 1e6
             config_results[spec.name] = {
                 "variant": spec.variant,
                 "beta0": spec.beta0,
@@ -216,38 +311,8 @@ def evaluate_prefix_biasing(
                 "expected_acceptance_biased": exp_acc_base,
                 "delta_expected_acceptance": 0.0,
                 "draft_biased_mass_on_candidates": draft_base_mass_cand,
-                "bias_overhead_us": round(lookup_us, 3),
+                "bias_overhead_us": round(bias_us, 3),
             }
-            continue
-
-        order_factor = 1.0 + cfg.order_decay * (matched_order - 1)
-        applied_boost = min(cfg.max_boost_cap, cfg.boost_weight * order_factor * gating)
-
-        t0_bias = time.perf_counter()
-        biased_logits = apply_evidence_bias(d_logits, evidence_indexer, context_tokens, config=cfg)
-        bias_us = (time.perf_counter() - t0_bias) * 1e6
-
-        q_biased = processed_distribution(biased_logits, temperature=temperature, top_k=top_k, top_p=top_p)
-        tv_biased = total_variation(p, q_biased)
-        exp_acc_biased = expected_acceptance(p, q_biased)
-        js_biased = jensen_shannon_divergence(p, q_biased)
-        draft_biased_mass = float(q_biased[cand_tensor].sum().item())
-
-        config_results[spec.name] = {
-            "variant": spec.variant,
-            "beta0": spec.beta0,
-            "is_biased": applied_boost > 0.0,
-            "gating_value": round(gating, 6),
-            "applied_boost": round(applied_boost, 6),
-            "tv_biased": tv_biased,
-            "delta_tv": tv_biased - tv_base,
-            "js_biased": js_biased,
-            "delta_js": js_biased - js_base,
-            "expected_acceptance_biased": exp_acc_biased,
-            "delta_expected_acceptance": exp_acc_biased - exp_acc_base,
-            "draft_biased_mass_on_candidates": draft_biased_mass,
-            "bias_overhead_us": round(bias_us, 3),
-        }
 
     return {
         "claim_id": str(claim_id),
