@@ -341,6 +341,45 @@ class StaticDraftRunner:
         self._is_prepared = True
         return self.setup_timings
 
+    @staticmethod
+    def _make_fast_causal_prefill_block_mask(p_len: int, cap: int, device: torch.device, block_size: int = 128) -> Any:
+        """Zero-compile analytical BlockMask for causal prefill into a StaticCache of length `cap`."""
+        from torch.nn.attention.flex_attention import BlockMask
+
+        num_q_blocks = (p_len + block_size - 1) // block_size
+        num_kv_blocks = cap // block_size
+        q_idx_arr = torch.arange(num_q_blocks, dtype=torch.int32, device=device)
+        kv_num_blocks = (q_idx_arr + 1).view(1, 1, num_q_blocks).contiguous()
+        kv_indices = (
+            torch.arange(num_kv_blocks, dtype=torch.int32, device=device)
+            .view(1, 1, 1, num_kv_blocks)
+            .expand(1, 1, num_q_blocks, num_kv_blocks)
+            .contiguous()
+        )
+        full_kv_num_blocks = torch.zeros((1, 1, num_q_blocks), dtype=torch.int32, device=device)
+        full_kv_indices = kv_indices.clone()
+        return BlockMask.from_kv_blocks(
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=full_kv_num_blocks,
+            full_kv_indices=full_kv_indices,
+            BLOCK_SIZE=block_size,
+            mask_mod=lambda b, h, q_idx, kv_idx: kv_idx <= q_idx,
+            seq_lengths=(p_len, cap),
+        )
+
+    @property
+    def static_kv_capacity_bytes(self) -> int:
+        from .cache_utils import get_cache_memory_bytes
+
+        return get_cache_memory_bytes(self.cache)
+
+    def active_kv_bytes(self, seq_len: int | None = None) -> int:
+        """Active KV-cache footprint proportional to `seq_len` (comparable to DynamicCache)."""
+        used = self.cur_len if seq_len is None else int(seq_len)
+        cap = max(1, self.max_cache_len)
+        return int(round(self.static_kv_capacity_bytes * (min(used, cap) / cap)))
+
     def prefill(self, prompt_ids: list[int]) -> torch.Tensor:
         """Prefill `StaticCache` with `prompt_ids` and return float32 next-token logits."""
         p_len = len(prompt_ids)
@@ -362,15 +401,8 @@ class StaticDraftRunner:
             "use_cache": True,
         }
         if self.use_flex_block_mask:
-            from torch.nn.attention.flex_attention import create_block_mask
-
-            kwargs["attention_mask"] = create_block_mask(
-                lambda b, h, q_idx, kv_idx: kv_idx <= q_idx,
-                B=1,
-                H=None,
-                Q_LEN=p_len,
-                KV_LEN=self.max_cache_len,
-                device=self.device,
+            kwargs["attention_mask"] = self._make_fast_causal_prefill_block_mask(
+                p_len, self.max_cache_len, self.device, block_size=self.FLEX_BLOCK_SIZE
             )
         if self._supports_l2k:
             kwargs["logits_to_keep"] = 1

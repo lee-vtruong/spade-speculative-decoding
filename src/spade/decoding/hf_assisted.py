@@ -13,6 +13,7 @@ from typing import Any
 import torch
 from .autoregressive import load_causal_lm, validate_tokenizers, format_qwen_prompt
 from .sampling import processed_distribution, sample_distribution
+from .runtime_opt import RunnerSetupTimings, StaticDraftRunner, processed_distribution_fast
 from .speculative import exact_speculative_round, greedy_verify
 from .cache_utils import CacheManager, crop_past_key_values, get_cache_seq_length
 from ..instrumentation.token_analysis import categorize_token, evidence_overlap
@@ -31,16 +32,44 @@ class Generation:
 
 class QwenPair:
     """Load a checked Qwen target/draft pair from local checkpoint paths."""
-    def __init__(self, target_path: str, draft_path: str | None = None, *, local_files_only: bool = True, dtype: str = "bfloat16"):
+    def __init__(
+        self,
+        target_path: str,
+        draft_path: str | None = None,
+        *,
+        local_files_only: bool = True,
+        dtype: str = "bfloat16",
+        draft_attn_implementation: str | None = None,
+    ):
         from transformers import AutoTokenizer
         self.target_tokenizer = AutoTokenizer.from_pretrained(target_path, local_files_only=local_files_only)
         self.draft_tokenizer = None
         self.target = load_causal_lm(target_path, local_files_only=local_files_only, dtype=dtype)
         self.draft = None
+        self.draft_runner: StaticDraftRunner | None = None
+        self.draft_setup_timings: RunnerSetupTimings | None = None
         if draft_path:
             self.draft_tokenizer = AutoTokenizer.from_pretrained(draft_path, local_files_only=local_files_only)
             validate_tokenizers(self.target_tokenizer, self.draft_tokenizer)
-            self.draft = load_causal_lm(draft_path, local_files_only=local_files_only, dtype=dtype)
+            self.draft = load_causal_lm(
+                draft_path,
+                local_files_only=local_files_only,
+                dtype=dtype,
+                attn_implementation=draft_attn_implementation,
+            )
+
+    def prepare_draft_runner(self, *, mode: str, max_cache_len: int, warmup_steps: int = 3) -> RunnerSetupTimings:
+        """Initialize and warm up a reusable StaticDraftRunner strictly outside timed claim loops."""
+        if self.draft is None:
+            raise ValueError("prepare_draft_runner requires a loaded draft model")
+        self.draft_runner = StaticDraftRunner(
+            self.draft,
+            max_cache_len=max_cache_len,
+            mode=mode,
+            device=self._input_device(self.draft),
+        )
+        self.draft_setup_timings = self.draft_runner.prepare(warmup_steps=warmup_steps)
+        return self.draft_setup_timings
 
     @staticmethod
     def _input_device(model):
@@ -77,10 +106,13 @@ class QwenPair:
                  dynamic_k_config: DynamicKConfig | None = None,
                  biasing_config: EvidenceBiasingConfig | None = None,
                  enable_biasing: bool = True,
-                 draft_prompt: str | None = None) -> Generation:
+                 draft_prompt: str | None = None,
+                 distribution_mode: str = "fp64_orig") -> Generation:
         """Run B0/B0-S/B1/B2/M4 with recompute or kv_cache strategy (supports asymmetric draft_prompt)."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4", "HF", "HF-Assisted"}:
             raise ValueError(f"Unsupported mode {mode}")
+        if distribution_mode not in {"fp64_orig", "fp32_fast"}:
+            raise ValueError(f"Unsupported distribution_mode {distribution_mode}")
         if mode in {"B1", "B2", "M4", "HF", "HF-Assisted"} and self.draft is None:
             raise ValueError(f"{mode} requires a draft model")
         if max_new_tokens < 1 or draft_length < 1:
@@ -243,8 +275,11 @@ class QwenPair:
                     dynamic_k_config=dynamic_k_config,
                     biasing_config=biasing_config,
                     enable_biasing=enable_biasing,
+                    distribution_mode=distribution_mode,
                 )
             except Exception as exc:
+                if getattr(self, "draft_runner", None) is not None:
+                    raise
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
                 if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
                     import sys
@@ -468,9 +503,18 @@ class QwenPair:
                            dynamic_k_config: DynamicKConfig | None = None,
                            biasing_config: EvidenceBiasingConfig | None = None,
                            enable_biasing: bool = True,
-                           draft_prompt_ids: list[int] | None = None) -> Generation:
+                           draft_prompt_ids: list[int] | None = None,
+                           distribution_mode: str = "fp64_orig") -> Generation:
         """KV-cache accelerated generation with rollback on rejection (supports asymmetric draft_prompt_ids)."""
         draft_base_ids = prompt_ids if draft_prompt_ids is None else draft_prompt_ids
+        draft_runner = getattr(self, "draft_runner", None) if (self.draft is not None and mode not in {"B0", "B0-S"}) else None
+        use_fast_dist = distribution_mode == "fp32_fast"
+
+        def _dist1(lg: torch.Tensor) -> torch.Tensor:
+            if use_fast_dist:
+                return processed_distribution_fast(lg, temperature=temperature, top_k=top_k, top_p=top_p, dtype=torch.float32)
+            return processed_distribution(lg, temperature, top_k, top_p)
+
         generated = []
         round_rows = []
         token_rows = []
@@ -479,6 +523,7 @@ class QwenPair:
             "target_verification_s": 0.0, "correction_s": 0.0, "decode_s": 0.0,
             "draft_prompt_tokens": float(len(draft_base_ids)),
             "draft_kv_prefill_bytes": 0.0, "draft_kv_peak_bytes": 0.0,
+            "draft_kv_static_capacity_bytes": 0.0,
             "target_kv_prefill_bytes": 0.0, "target_kv_peak_bytes": 0.0,
         }
 
@@ -508,24 +553,33 @@ class QwenPair:
 
         # Draft prefill (on draft_base_ids — may be shorter/selective than target prompt_ids)
         peak_draft_kv_bytes = 0
-        if self.draft is not None:
+        if self.draft is not None and mode not in {"B0", "B0-S"}:
             draft_device = self._input_device(self.draft)
             self._sync(draft_device)
             d0 = time.perf_counter()
-            dinp = torch.tensor([draft_base_ids], dtype=torch.long, device=draft_device)
-            draft_prefill_kwargs: dict[str, Any] = {"input_ids": dinp, "use_cache": True}
-            if self._supports_logits_to_keep(self.draft):
-                draft_prefill_kwargs["logits_to_keep"] = 1
-            with torch.inference_mode():
-                dout = self.draft(**draft_prefill_kwargs)
-            self._sync(draft_device)
-            timings["draft_prefill_s"] += time.perf_counter() - d0
-            draft_cache_mgr.update(dout.past_key_values)
-            draft_kv_prefill_bytes = draft_cache_mgr.memory_bytes
-            peak_draft_kv_bytes = draft_kv_prefill_bytes
-            timings["draft_kv_prefill_bytes"] = float(draft_kv_prefill_bytes)
-            next_draft_logits = dout.logits[0, -1].float()
-            del dout, dinp
+            if draft_runner is not None:
+                next_draft_logits = draft_runner.prefill(draft_base_ids)
+                self._sync(draft_device)
+                timings["draft_prefill_s"] += time.perf_counter() - d0
+                draft_kv_prefill_bytes = draft_runner.active_kv_bytes()
+                peak_draft_kv_bytes = draft_kv_prefill_bytes
+                timings["draft_kv_prefill_bytes"] = float(draft_kv_prefill_bytes)
+                timings["draft_kv_static_capacity_bytes"] = float(draft_runner.static_kv_capacity_bytes)
+            else:
+                dinp = torch.tensor([draft_base_ids], dtype=torch.long, device=draft_device)
+                draft_prefill_kwargs: dict[str, Any] = {"input_ids": dinp, "use_cache": True}
+                if self._supports_logits_to_keep(self.draft):
+                    draft_prefill_kwargs["logits_to_keep"] = 1
+                with torch.inference_mode():
+                    dout = self.draft(**draft_prefill_kwargs)
+                self._sync(draft_device)
+                timings["draft_prefill_s"] += time.perf_counter() - d0
+                draft_cache_mgr.update(dout.past_key_values)
+                draft_kv_prefill_bytes = draft_cache_mgr.memory_bytes
+                peak_draft_kv_bytes = draft_kv_prefill_bytes
+                timings["draft_kv_prefill_bytes"] = float(draft_kv_prefill_bytes)
+                next_draft_logits = dout.logits[0, -1].float()
+                del dout, dinp
         else:
             draft_device = target_device
             next_draft_logits = None
@@ -546,7 +600,7 @@ class QwenPair:
                 if mode == "B0":
                     token = int(torch.argmax(next_target_logits).item())
                 else:
-                    token = sample_distribution(processed_distribution(next_target_logits, temperature, top_k, top_p), generator)
+                    token = sample_distribution(_dist1(next_target_logits), generator)
                 generated.append(token)
                 if token == target_eos or len(generated) >= max_new_tokens:
                     target_s = time.perf_counter() - t0
@@ -580,29 +634,34 @@ class QwenPair:
             cur_draft_logits = next_draft_logits
 
             target_cache_len_before = target_cache_mgr.seq_length
-            draft_cache_len_before = draft_cache_mgr.seq_length
+            draft_cache_len_before = draft_runner.cur_len if draft_runner is not None else draft_cache_mgr.seq_length
 
             for idx in range(count):
                 logits_to_process = cur_draft_logits
                 if mode == "M4" and enable_biasing and evidence_indexer is not None and (biasing_config is None or biasing_config.boost_weight > 0.0):
                     context_now = prompt_ids + generated + proposed
                     logits_to_process = apply_evidence_bias(cur_draft_logits, evidence_indexer, context_now, config=biasing_config)
-                q = processed_distribution(logits_to_process, temperature, top_k, top_p)
+                q = _dist1(logits_to_process)
                 token = int(torch.argmax(q).item()) if mode == "B1" else sample_distribution(q, generator)
                 proposed.append(token)
                 q_dists.append(q)
                 if token == target_eos:
                     break
                 if idx < count - 1:
-                    dinp = torch.tensor([[token]], dtype=torch.long, device=draft_device)
-                    with torch.inference_mode():
-                        dout = self.draft(input_ids=dinp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
-                    draft_cache_mgr.update(dout.past_key_values)
-                    cur_draft_logits = dout.logits[0, -1].float()
+                    if draft_runner is not None:
+                        cur_draft_logits = draft_runner.step(token)
+                    else:
+                        dinp = torch.tensor([[token]], dtype=torch.long, device=draft_device)
+                        with torch.inference_mode():
+                            dout = self.draft(input_ids=dinp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
+                        draft_cache_mgr.update(dout.past_key_values)
+                        cur_draft_logits = dout.logits[0, -1].float()
 
             self._sync(draft_device)
             draft_s = time.perf_counter() - d0
             timings["draft_generation_s"] += draft_s
+            if draft_runner is not None:
+                peak_draft_kv_bytes = max(peak_draft_kv_bytes, draft_runner.active_kv_bytes())
 
             # Target model verifies proposed tokens in a single batched forward pass
             # If pending_target_token is present from previous round (residual or bonus token),
@@ -624,7 +683,15 @@ class QwenPair:
             target_cache_mgr.update(tout.past_key_values)
 
             # Target distributions:
-            if has_pending:
+            if use_fast_dist:
+                if has_pending:
+                    t_stack = tout.logits[0, : len(proposed) + 1].float()
+                else:
+                    t_stack = torch.cat([next_target_logits.unsqueeze(0), tout.logits[0, : len(proposed)].float()], dim=0)
+                batched_p = processed_distribution_fast(t_stack, temperature=temperature, top_k=top_k, top_p=top_p, dtype=torch.float32)
+                p_dists = [batched_p[i] for i in range(len(proposed))]
+                target_extra = batched_p[len(proposed)]
+            elif has_pending:
                 p_dists = [processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p) for i in range(len(proposed))]
                 target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
             else:
@@ -661,7 +728,10 @@ class QwenPair:
                         target_cache_mgr.rollback(target_cache_len_before + 1 + rejection)
                     else:
                         target_cache_mgr.rollback(target_cache_len_before + rejection)
-                    draft_cache_mgr.rollback(draft_cache_len_before + rejection)
+                    if draft_runner is not None:
+                        draft_runner.rollback(draft_cache_len_before + rejection)
+                    else:
+                        draft_cache_mgr.rollback(draft_cache_len_before + rejection)
                 else:
                     status = ["accepted"] * len(accepted) + ["discarded_after_rejection"] * (len(proposed) - len(accepted))
                 extra = None
@@ -683,7 +753,10 @@ class QwenPair:
                         target_cache_mgr.rollback(target_cache_len_before + 1 + rejection)
                     else:
                         target_cache_mgr.rollback(target_cache_len_before + rejection)
-                    draft_cache_mgr.rollback(draft_cache_len_before + rejection)
+                    if draft_runner is not None:
+                        draft_runner.rollback(draft_cache_len_before + rejection)
+                    else:
+                        draft_cache_mgr.rollback(draft_cache_len_before + rejection)
                 repl_val = result.replacement
                 p_rej = p_dists[result.rejected_position] if repl_val is not None else None
                 q_rej = q_dists[result.rejected_position] if repl_val is not None else None
@@ -719,7 +792,7 @@ class QwenPair:
 
             if not is_done:
                 # We defer target forward pass on the newly committed token to the next
-                # verification batch, and run a single batched draft catch-up step so draft
+                # verification batch, and run a draft catch-up step so draft
                 # KV cache aligns with prompt + generated and emits next_draft_logits.
                 d_upd0 = time.perf_counter()
                 if rejection is not None:
@@ -735,15 +808,23 @@ class QwenPair:
                     next_target_logits = tout.logits[0, -1].float()
                     draft_update_tokens = [proposed[-1]]
 
-                d_step_inp = torch.tensor([draft_update_tokens], dtype=torch.long, device=draft_device)
-                with torch.inference_mode():
-                    step_dout = self.draft(input_ids=d_step_inp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
-                self._sync(draft_device)
-                d_upd_s = time.perf_counter() - d_upd0
-                draft_s += d_upd_s
-                timings["draft_generation_s"] += d_upd_s
-                draft_cache_mgr.update(step_dout.past_key_values)
-                next_draft_logits = step_dout.logits[0, -1].float()
+                if draft_runner is not None:
+                    next_draft_logits = draft_runner.step_many(draft_update_tokens)
+                    self._sync(draft_device)
+                    d_upd_s = time.perf_counter() - d_upd0
+                    draft_s += d_upd_s
+                    timings["draft_generation_s"] += d_upd_s
+                    peak_draft_kv_bytes = max(peak_draft_kv_bytes, draft_runner.active_kv_bytes())
+                else:
+                    d_step_inp = torch.tensor([draft_update_tokens], dtype=torch.long, device=draft_device)
+                    with torch.inference_mode():
+                        step_dout = self.draft(input_ids=d_step_inp, past_key_values=draft_cache_mgr.past_key_values, use_cache=True)
+                    self._sync(draft_device)
+                    d_upd_s = time.perf_counter() - d_upd0
+                    draft_s += d_upd_s
+                    timings["draft_generation_s"] += d_upd_s
+                    draft_cache_mgr.update(step_dout.past_key_values)
+                    next_draft_logits = step_dout.logits[0, -1].float()
 
             round_rows.append({"run_id": run_id, "claim_id": claim_id, "round_index": round_index, "prefix_length": len(prompt_ids) + generation_start, "draft_length_requested": current_k, "dynamic_k_reason": dynamic_reason, "proposed_token_count": len(proposed), "accepted_draft_tokens": accepted_draft, "rejection_position": rejection, "full_acceptance": rejection is None and accepted_draft == len(proposed), "additional_target_token": extra is not None, "committed_output_tokens": len(generated) - generated_before, "draft_latency_s": draft_s, "verification_latency_s": target_s, "correction_latency_s": correction_s, "total_round_latency_s": time.perf_counter() - rstart, "cumulative_generated_tokens": len(generated)})
 
@@ -754,7 +835,10 @@ class QwenPair:
 
         timings["decode_s"] = time.perf_counter() - start
         timings["target_kv_peak_bytes"] = float(max(peak_target_kv_bytes, target_cache_mgr.memory_bytes))
-        timings["draft_kv_peak_bytes"] = float(max(peak_draft_kv_bytes, draft_cache_mgr.memory_bytes))
+        if draft_runner is not None:
+            timings["draft_kv_peak_bytes"] = float(max(peak_draft_kv_bytes, draft_runner.active_kv_bytes()))
+        else:
+            timings["draft_kv_peak_bytes"] = float(max(peak_draft_kv_bytes, draft_cache_mgr.memory_bytes))
         target_cache_mgr.reset()
         draft_cache_mgr.reset()
         if target_device.type == "cuda" and len(prompt_ids) >= 4096:

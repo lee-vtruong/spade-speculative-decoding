@@ -41,6 +41,24 @@ def main():
     p.add_argument("--draft-top-k",type=int,default=2,help="Evidence passages retained for draft under selective_topk")
     p.add_argument("--draft-compact-sentences",type=int,default=1,help="Max claim-salient sentences per evidence passage under compact")
     p.add_argument("--draft-compact-chars",type=int,default=160,help="Max characters per evidence passage under compact")
+    p.add_argument(
+        "--draft-runtime",
+        choices=["eager_dynamic", "flex_compile_reduce_overhead", "flex_cudagraph_static", "flex_compile_default", "flex_eager_static"],
+        default="eager_dynamic",
+        help="Draft decode runtime backend (B1.1/B1.2). Defaults to eager_dynamic.",
+    )
+    p.add_argument(
+        "--draft-max-cache-len",
+        type=int,
+        default=None,
+        help="Optional StaticCache capacity for flex_* draft runtimes (auto-sized to multiple of 128 if omitted).",
+    )
+    p.add_argument(
+        "--distribution-mode",
+        choices=["fp64_orig", "fp32_fast"],
+        default="fp64_orig",
+        help="Sampling/top-p distribution precision mode (default fp64_orig; fp32_fast uses zero-sync fp32).",
+    )
     a=p.parse_args()
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
     if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
@@ -57,13 +75,49 @@ def main():
     try:
         import torch, transformers
         from spade.decoding.hf_assisted import QwenPair
+        from spade.decoding.autoregressive import format_qwen_prompt
         from spade.adaptive.biasing import EvidenceBiasingConfig
         from spade.adaptive.context_selection import build_draft_context
         from spade.benchmark.evaluation import parse_generation
         from spade.paths import project_root
         from spade.instrumentation.trace_writer import TraceWriter
     except ImportError as exc: raise SystemExit(f"Required runtime dependency missing: {exc}") from exc
-    pair=QwenPair(a.target,None if a.mode in {"B0","B0-S"} else a.draft,local_files_only=True,dtype=a.dtype)
+    use_flex_draft = (a.draft_runtime != "eager_dynamic") and (a.mode not in {"B0", "B0-S"})
+    pair=QwenPair(
+        a.target,
+        None if a.mode in {"B0","B0-S"} else a.draft,
+        local_files_only=True,
+        dtype=a.dtype,
+        draft_attn_implementation="flex_attention" if use_flex_draft else None,
+    )
+    draft_setup_dict = None
+    draft_max_cache_len = a.draft_max_cache_len
+    if use_flex_draft:
+        if draft_max_cache_len is None:
+            dtok = pair.draft_tokenizer or pair.target_tokenizer
+            max_p_len = 0
+            for row in rows:
+                dctx_tmp = build_draft_context(
+                    row,
+                    policy=a.draft_context_policy,
+                    top_k=a.draft_top_k,
+                    compact_sentences=a.draft_compact_sentences,
+                    compact_chars=a.draft_compact_chars,
+                )
+                ser_d = format_qwen_prompt(dtok, dctx_tmp.draft_prompt)
+                max_p_len = max(max_p_len, len(dtok(ser_d, add_special_tokens=False)["input_ids"]))
+            needed = max(512, max_p_len + a.max_new_tokens + 64)
+            draft_max_cache_len = ((needed + 127) // 128) * 128
+        runner_mode = a.draft_runtime.removeprefix("flex_")
+        setup_timings = pair.prepare_draft_runner(mode=runner_mode, max_cache_len=draft_max_cache_len, warmup_steps=3)
+        draft_setup_dict = {
+            "mode": a.draft_runtime,
+            "max_cache_len": setup_timings.max_cache_len,
+            "cache_init_s": round(setup_timings.cache_init_s, 4),
+            "compile_s": round(setup_timings.compile_s, 4),
+            "warmup_s": round(setup_timings.warmup_s, 4),
+            "graph_capture_s": round(setup_timings.graph_capture_s, 4),
+        }
     is_kv = (a.cache_strategy == "kv_cache") or (a.mode in {"HF", "HF-Assisted"})
     enable_biasing = (a.mode == "M4") and (not a.no_biasing) and (a.beta0 > 0.0)
     biasing_cfg = EvidenceBiasingConfig(
@@ -73,9 +127,9 @@ def main():
         entropy_threshold=a.entropy_threshold,
         max_boost_cap=a.max_boost_cap,
     ) if a.mode == "M4" else None
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"draft_context_policy":a.draft_context_policy,"draft_top_k":a.draft_top_k,"draft_compact_sentences":a.draft_compact_sentences,"draft_compact_chars":a.draft_compact_chars,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"draft_context_policy":a.draft_context_policy,"draft_top_k":a.draft_top_k,"draft_compact_sentences":a.draft_compact_sentences,"draft_compact_chars":a.draft_compact_chars,"draft_runtime":a.draft_runtime,"draft_max_cache_len":draft_max_cache_len,"distribution_mode":a.distribution_mode,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
-    env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"git_commit":None,"git_dirty":None}
+    env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"draft_runtime":a.draft_runtime,"distribution_mode":a.distribution_mode,"draft_setup_timings":draft_setup_dict,"git_commit":None,"git_dirty":None}
     try:
         env["git_commit"]=subprocess.check_output(["git","rev-parse","HEAD"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
         porcelain=subprocess.check_output(["git","status","--porcelain"],cwd=project_root(),text=True,stderr=subprocess.DEVNULL).strip()
@@ -87,7 +141,7 @@ def main():
     write_json(out/"environment.json",env)
     writer=TraceWriter(out/"round_traces.jsonl",out/"token_traces.jsonl")
     canonical=[]; trial_rows=[]
-    common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg,"enable_biasing":enable_biasing}
+    common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg,"enable_biasing":enable_biasing,"distribution_mode":a.distribution_mode}
     if a.global_warmup > 0:
         wrow = rows[0]
         wev = [e.get("text","") for e in wrow.get("evidence",[])]
@@ -125,6 +179,7 @@ def main():
         env["gpu_peak_reserved_bytes"]=[torch.cuda.max_memory_reserved(i) for i in range(torch.cuda.device_count())]
         write_json(out/"environment.json",env)
     metric={"run_id":run_id,"examples":len(canonical),"trials_per_example":a.trials,"warmups_per_example":a.warmup,"global_warmup":a.global_warmup,
+            "draft_runtime":a.draft_runtime,"distribution_mode":a.distribution_mode,"draft_setup_timings":draft_setup_dict,
             "json_parse_success_rate":sum(x["parse_success"] for x in canonical)/len(canonical),
             "citation_id_validity_rate":sum(x["citation_id_validity"] for x in canonical)/len(canonical),
             "mean_output_tokens":statistics.mean(x["output_tokens"] for x in canonical),"mean_decode_s_per_trial":statistics.mean(x["decode_s"] for x in trial_rows),

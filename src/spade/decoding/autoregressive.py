@@ -2,14 +2,29 @@
 from __future__ import annotations
 from typing import Any
 
-def load_causal_lm(model_name_or_path: str, *, local_files_only: bool = True, dtype: str = "bfloat16", revision: str | None = None):
+def load_causal_lm(
+    model_name_or_path: str,
+    *,
+    local_files_only: bool = True,
+    dtype: str = "bfloat16",
+    revision: str | None = None,
+    attn_implementation: str | None = None,
+):
     try:
         import torch
         from transformers import AutoModelForCausalLM
     except ImportError as exc: raise RuntimeError("Install the pinned server requirements to load models") from exc
     torch_dtype=getattr(torch,dtype,None)
     if torch_dtype is None: raise ValueError(f"Unsupported torch dtype: {dtype}")
-    return AutoModelForCausalLM.from_pretrained(model_name_or_path,torch_dtype=torch_dtype,revision=revision,local_files_only=local_files_only,device_map="auto")
+    kwargs: dict[str, Any] = {
+        "torch_dtype": torch_dtype,
+        "revision": revision,
+        "local_files_only": local_files_only,
+        "device_map": "auto",
+    }
+    if attn_implementation is not None:
+        kwargs["attn_implementation"] = attn_implementation
+    return AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs).eval()
 
 def validate_tokenizers(target: Any, draft: Any) -> None:
     """Fail closed unless vocab IDs and relevant special-token/template metadata agree."""
