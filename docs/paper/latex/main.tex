@@ -28,7 +28,7 @@
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} with two-one-sided-test (TOST) acceptance equivalence. Across successive model generations (\texttt{Qwen2.5-7B/0.5B} and \texttt{Qwen3-8B/0.6B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
+Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} and preserving token acceptance within a practical $\pm 1.0\text{ pp}$ equivalence margin ($78.20\%$ vs.\ $78.16\%$). Across successive model generations (\texttt{Qwen2.5-7B/0.5B} and \texttt{Qwen3-8B/0.6B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
 \end{abstract}
 
 \section{Introduction}
@@ -53,10 +53,10 @@ To overcome this dilemma, we present \textbf{SPADE} (\textbf{S}peculative \textb
 
 The primary contributions of this paper are:
 \begin{itemize}
-    \item \textbf{Asymmetric Speculative Formulation:} We formalize asymmetric context speculative decoding and prove that conditioning the drafter on compressed context preserves the target model's exact output distribution without distribution drift (Theorem \ref{thm:invariance}).
-    \item \textbf{Target-Prefill Attention Hook:} We introduce a zero-overhead hook extracting upper-layer query-to-evidence attention weights during target prefill, paired with sentence-level greedy packing that enforces 100\% passage coverage with zero auxiliary neural compute.
-    \item \textbf{Rigorous Empirical Acceleration:} On 300 held-out AVeriTeC claims on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} (+22.4\% vs.\ AR, +4.4\% vs.\ Full Speculative, $p < 10^{-4}$), slashes draft KV cache by \textbf{$-63.9\%$}, and demonstrates equivalence in acceptance rate ($\alpha_{\text{eval}} = 78.20\%$ vs $78.16\%$) under a two-one-sided-test (TOST) margin.
-    \item \textbf{Cross-Model Architecture Generalization:} We demonstrate robust transferability on \texttt{Qwen2.5-7B/0.5B}, delivering a $+11.7\%$ speedup over target AR and $-63.8\%$ draft KV cache reduction.
+    \item \textbf{Target-Prefill Attention-Guided Sentence Selection:} We design a zero-overhead forward hook capturing upper-layer causal self-attention weights during target prefill, paired with sentence-level greedy packing that enforces 100\% passage coverage ($m/m$) under a calibrated character budget with zero auxiliary forward passes.
+    \item \textbf{Decoupled Asymmetric Speculative Formulation:} We formalize asymmetric context speculative decoding, showing that conditioning the drafter on an attention-selected evidence subset $C_{\text{draft}} = g(C_{\text{full}}; B)$ while verifying against the full context $C_{\text{full}}$ provides provable target distribution invariance (Theorem \ref{thm:invariance}) without heuristic quality degradation.
+    \item \textbf{Rigorous Empirical Acceleration:} On 300 held-out long-context AVeriTeC claims on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput (+22.4\% vs.\ AR, +4.4\% vs.\ Full Speculative, $p < 10^{-4}$), slashes draft KV cache by \textbf{$-63.9\%$}, and preserves token acceptance within a practical $\pm 1.0\text{ pp}$ equivalence margin ($\alpha_{\text{eval}} = 78.20\%$ vs $78.16\%$).
+    \item \textbf{Cross-Model Version Generalization:} Across successive model generations (\texttt{Qwen2.5-7B/0.5B}), SPADE demonstrates robust transferability, delivering a $+11.7\%$ speedup over target AR and $-63.8\%$ draft KV cache reduction.
 \end{itemize}
 
 \section{Related Work}
@@ -198,8 +198,8 @@ SPADE achieves \textbf{43.28 tok/s} end-to-end throughput, outperforming target 
 \paragraph{Active KV Cache Slashing:}
 SPADE slashes active draft KV cache memory by \textbf{$-63.9\%$} ($566.9\text{ MB} \to 204.6\text{ MB}$, $p < 10^{-4}$) by compressing draft prompt tokens from $5,090.1 \to 1,776.8$ ($-65.1\%$). Peak GPU VRAM decreases from $22.57\text{ GB} \to 21.23\text{ GB}$.
 
-\paragraph{Acceptance Parity under Equivalence Testing:}
-SPADE achieves an evaluated acceptance of \textbf{78.20\%} ($3.114$ tokens/round), outperforming Baseline Full ($78.16\%$) by $+0.04\text{ pp}$. Equivalence testing via two-one-sided-tests (TOST) with a $\pm 1.0\text{ pp}$ margin confirms equivalence: the 90\% CI of $[-0.35, +0.44]\text{ pp}$ falls strictly within bounds ($p_1 < 10^{-4}, p_2 < 10^{-4}$).
+\paragraph{Empirical Acceptance Equivalence within Practical Margin:}
+SPADE achieves an evaluated acceptance of \textbf{78.20\%} ($3.114$ tokens/round), compared to $78.16\%$ for Baseline Full ($+0.04\text{ pp}$). Equivalence testing via two-one-sided-tests (TOST) within a practical $\pm 1.0\text{ pp}$ margin supports empirical equivalence: the 90\% CI of $[-0.35, +0.44]\text{ pp}$ falls strictly within bounds ($p_1 < 10^{-4}, p_2 < 10^{-4}$). We note that this analysis demonstrates empirical equivalence bounded by the selected $\pm 1.0\text{ pp}$ tolerance margin, rather than asserting identical proposal distributions.
 
 
 
@@ -254,7 +254,7 @@ Conflicting Evidence & 15 & 22 & 21 & 19 \\
 
 \subsection{Downstream Fact-Checking Veracity}
 \label{sec:veracity}
-We emphasize that this investigation evaluates speculative decoding inference efficiency and distribution invariance rather than claiming state-of-the-art fact-checking accuracy. Table \ref{tab:verdict_distribution} reports veracity classification across 300 held-out claims. Macro-F1 scores remain identical within statistical error ($0.1222$ for SPADE vs $0.1254$ for Baseline Full vs $0.1267$ for Target AR, $p > 0.85$). The modest Macro-F1 reflects domain transfer challenges of zero-shot base models on AVeriTeC rather than speculative degradation. All methods achieve 100.0\% JSON schema validity and 100.0\% citation format validity, verifying that SPADE preserves task-level decision parity with autoregression.
+We emphasize that this investigation evaluates speculative decoding inference efficiency and distribution preservation rather than claiming state-of-the-art fact-checking accuracy. Table \ref{tab:verdict_distribution} reports veracity classification across 300 held-out claims. No statistically significant difference in Macro-F1 was detected between decoding configurations ($0.1222$ for SPADE vs.\ $0.1254$ for Baseline Full vs.\ $0.1267$ for Target AR; paired bootstrap $p > 0.85$), with all methods achieving 100.0\% JSON schema validity and 100.0\% citation format validity. The modest Macro-F1 reflects domain transfer challenges of zero-shot base models on AVeriTeC. These results confirm that selective speculative drafting introduces no measurable degradation in veracity predictions relative to standard autoregression, rather than proving strict task-level decision equivalence.
 
 \subsection{Cross-Model Version Generalization}
 \label{sec:qwen25_generalization}
@@ -295,10 +295,7 @@ Our primary empirical benchmarks were conducted on an NVIDIA RTX 5090 (32GB VRAM
 SPADE currently employs a calibrated static character budget ($B = 10\text{k}$ characters). While our zero-overhead bypass handles short contexts, future work could investigate dynamic budget allocation conditioned on input entropy.
 
 \paragraph{Task Scope \& Downstream Performance:}
-Evaluations used AVeriTeC as a rigorous, real-world long-context testbed for inference acceleration. Because zero-shot base models achieve modest veracity Macro-F1 ($\approx 0.12$), downstream metrics verify distribution and decision invariance rather than state-of-the-art fact-checking performance. Evaluating SPADE with fine-tuned verifiers across broader RAG and conversational domains is an important future direction.
-
-\paragraph{Task Scope:}
-Evaluations focused on knowledge-intensive claim verification and multi-document reasoning (AVeriTeC). Extending asymmetric context drafting to multi-turn conversational agents and code synthesis remains promising future work.
+Evaluations used AVeriTeC as a rigorous, real-world long-context testbed for inference acceleration. Because zero-shot base models achieve modest veracity Macro-F1 ($\approx 0.12$), downstream metrics verify distribution invariance rather than state-of-the-art fact-checking performance. Evaluating SPADE with fine-tuned verifiers across broader RAG and multi-turn conversational domains remains promising future work.
 
 \section*{Ethics Statement}
 This work introduces an algorithmic acceleration framework that strictly preserves the mathematical output distribution of pre-trained language models. SPADE does not generate novel risks or biases beyond those inherent in the underlying foundation models. All evaluations utilized publicly available, anonymized benchmark datasets.
@@ -320,20 +317,21 @@ This work introduces an algorithmic acceleration framework that strictly preserv
     \item \textbf{Compilation:} Static CUDA graphs via \texttt{torch.compile(mode="reduce-overhead")}, PyTorch \texttt{FlexAttention}.
 \end{itemize}
 
-\section{Statistical Significance Provenance \& Complete Benchmark Tables}
+\section{Benchmark Provenance \& Evaluation Methodology}
 \label{app:provenance}
+
+\subsection{Dataset Splits \& Significance Testing}
 All paired comparisons were computed using $B = 10,000$ bootstrap iterations resampled strictly at the \texttt{claim\_id} cluster level:
 \begin{itemize}
     \item Primary Held-Out: \nolinkurl{b1_4_heldout300/b1_3_live_report.json}
     \item Auxiliary Oracle: \nolinkurl{b1_4_oracle400/b1_3_live_report.json}
     \item Qwen2.5 Held-Out: \nolinkurl{p2_qwen25_heldout300/b1_3_live_report.json}
 \end{itemize}
-(All reports stored under \nolinkurl{outputs/analysis/}).
+(All raw reports stored under \nolinkurl{outputs/analysis/}).
+Table \ref{tab:oracle_results} reports the complete evaluation on 393 auxiliary short-context oracle claims, demonstrating exact empirical parity for SPADE's zero-overhead bypass ($p = 1.0000$). Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model generalization on Qwen2.5-7B/0.5B across all 300 held-out claims.
 
-Table \ref{tab:oracle_results} reports the complete evaluation on 393 auxiliary short-context oracle claims, demonstrating exact empirical parity for SPADE's zero-overhead bypass ($p = 1.0000$).
-Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model generalization on Qwen2.5-7B/0.5B across all 300 held-out claims.
-
-\paragraph{Lexical Content Coverage Methodology:} Non-stopword lexical coverage is computed by lowercasing and tokenizing target reasoning justifications and draft evidence sentences, stripping punctuation and standard NLTK English stopwords, and calculating set-based token recall of justification content words in $C_{\text{draft}}$. SPADE achieves a mean non-stopword lexical coverage of $91.3\%$.
+\subsection{Lexical Content Coverage Protocol}
+To evaluate sentence-level evidence retention without relying on passage headers alone, we measured non-stopword lexical content coverage. Target reasoning justifications and retained draft evidence sentences are lowercased and tokenized using regex word boundaries. Punctuation and standard NLTK English stopwords are filtered out. We then compute the set-based token recall of justification content words present in $C_{\text{draft}}$. Across all 300 held-out claims, SPADE achieves a mean non-stopword lexical coverage of $91.3\%$.
 
 \section{Systems Engineering: StaticCache Rollback \& Numerical Validation}
 \label{app:systems}
