@@ -141,7 +141,7 @@ By restructuring the selection space from passages to **sentences across all pas
 ## 4. Methodology: SPADE
 
 ### 4.1. Mathematical Formulation of Asymmetric Speculative Decoding
-Let $x_{<t}$ denote the sequence generated up to step $t$. Let $C_{\text{full}}$ denote the complete prompt including all retrieved evidence passages $E$, and let $C_{\text{draft}} \subset C_{\text{full}}$ denote the compact draft context constructed by SPADE.
+Let $x_{<t}$ denote the sequence generated up to step $t$. Let $C_{\text{full}}$ denote the complete prompt including all retrieved evidence passages $E$, and let $C_{\text{draft}} = g(C_{\text{full}}; B)$ denote the compact draft context constructed by SPADE.
 
 At each speculative round:
 1. **Draft Proposal:** The draft model autoregressively samples $K$ candidate tokens $\tilde{x}_1, \dots, \tilde{x}_K$ from its conditioned distribution:
@@ -457,7 +457,7 @@ Strict equivalence between FP64 and FP32 fast math over 1,000 verification steps
 Prior speculative decoding work hypothesized that boosting draft model logits on evidence tokens could improve drafting. We systematically evaluated evidence logit biasing by injecting an additive bonus $\Delta z_v = \beta_0 \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to draft model logits prior to sampling.
 
 #### Empirical Distribution Audit ( = 9,331$ Prefixes):
-We evaluated static and entropy-gated biasing configurations across  = 9,331$ teacher-forced prefixes from 100 claims, computing per-prefix expected acceptance  - \text{TV}(p, q) = \sum_v \min(p(v), q(v))$ and Jensen-Shannon divergence. As shown in the table below, at low biasing weights ($\beta_0 \le 0.50$), logit biasing yields a statistically negligible gain ($\Delta \le +0.11\text{ pp}$, 95% CI $[+0.03, +0.20]\text{ pp}$ across all prefixes). At higher weights ($\beta_0 \ge 1.50$), biasing actively degrades distribution alignment ($\Delta = -0.17\text{ pp}$ to $-0.31\text{ pp}$, 95% CI $[-0.52, -0.10]\text{ pp}$).
+We evaluated static and entropy-gated biasing configurations across  = 9,331$ teacher-forced prefixes from 100 claims, computing per-prefix expected acceptance  - \text{TV}(p, q) = \sum_v \min(p(v), q(v))$ and Jensen-Shannon divergence. As shown in the table below, at low biasing weights ($\beta_0 \le 0.50$), logit biasing yields a statistically negligible gain ($\Delta \le +0.11\text{ pp}$, 95% CI $[+0.03, +0.20]\text{ pp}$ across all prefixes). At $\beta_0 = 1.00$, the effect is indistinguishable from zero ($\Delta = +0.02\text{ pp}$,  = 0.78$). At $\beta_0 = 1.50$, performance exhibits an inconclusive downward trend ($\Delta = -0.17\text{ pp}$, 95% CI $[-0.35, +0.02]\text{ pp}$), and at $\beta_0 = 2.00$, biasing causes statistically significant distribution degradation ($\Delta = -0.31\text{ pp}$, 95% CI $[-0.52, -0.10]\text{ pp}$,  = 0.0042$).
 
 | Biasing $\beta_0$ | Biased -\text{TV}$ | $\Delta(1-\text{TV})$ | 95% CI (pp) | Overhead |
 | :--- | :---: | :---: | :---: | :---: |
@@ -471,7 +471,7 @@ We evaluated static and entropy-gated biasing configurations across  = 9,331$ te
 *Table 9: Empirical audit of static logit biasing across 100 claims under teacher-forced verification ( = 9,331$ prefixes). Sourced from outputs/analysis/m4_1_distribution_audit/distribution_audit_report.json.*
 
 #### Root Cause of Biasing Failure:
-Detailed error profiling reveals that in cases where logit biasing degrades TV, the target model places near-zero probability mass on evidence tokens ((S_E) = 0.056$). Forcing draft probability mass onto evidence n-grams out of syntactic context causes the target verifier to reject candidate chains. Furthermore, applying the logit mask incurs an additional \text{--}65\,\mu\text{s}$ per prefix of computation overhead. These empirical findings conclusively establish that selective drafting must operate at the *context level* (SPADE) rather than the *logit level*.
+Detailed error profiling reveals that in cases where logit biasing degrades TV, the target model places near-zero probability mass on evidence tokens ((S_E) = 0.056$). Forcing draft probability mass onto evidence n-grams out of syntactic context causes the target verifier to reject candidate chains. Furthermore, applying the logit mask incurs an additional \text{--}65\,\mu\text{s}$ per prefix of computation overhead. These findings motivate context-level selection as a more effective alternative to the evaluated evidence n-gram logit-biasing schemes under our experimental setting.
 
 ### E. ACL Reproducibility Checklist & Artifact Availability
 - **Code Repository:** Anonymized repository at `https://anonymous.4open.science/r/SPADE-ACL2026`.
