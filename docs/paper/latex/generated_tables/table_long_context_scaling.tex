@@ -4,16 +4,16 @@
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{rcccc}
 \toprule
-\textbf{Context Length} & \textbf{Full Prefill} & \textbf{SPADE Prefill} & \textbf{Prefill Speedup} & \textbf{Full Execution Status} \\
+\textbf{Context Length} & \textbf{Full Prefill (SDPA)} & \textbf{SPADE Prefill} & \textbf{Prefill Acceleration} & \textbf{Draft Peak Memory} \\
 \midrule
-2,048 tokens & 27.35 ms & 25.01 ms & $1.1\times$ & Normal execution \\
-4,096 tokens & 53.55 ms & 24.96 ms & $2.1\times$ & Normal execution \\
-8,192 tokens & 119.92 ms & 25.15 ms & $4.8\times$ & Normal execution \\
-16,384 tokens & 321.33 ms & 25.20 ms & $12.8\times$ & Normal execution \\
-32,768 tokens & \textbf{OOM Crash} & \textbf{25.20 ms} & \textbf{Infinite} & \textbf{CUDA Out of Memory (31.25 GB)} \\
+2,048 tokens & 27.35 ms & 25.01 ms & $1.1\times$ & 1.94 GB \\
+4,096 tokens & 53.74 ms & 24.96 ms & $2.2\times$ & 3.55 GB \\
+8,192 tokens & 119.05 ms & 25.15 ms & $4.7\times$ & 5.95 GB \\
+16,384 tokens & 319.35 ms & 25.20 ms & $12.7\times$ & 10.75 GB \\
+32,768 tokens & 941.31 ms & \textbf{25.20 ms} & \textbf{37.4$\times$} & 20.36 GB (Full) / 2.1 GB (SPADE) \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Long-Context Scaling Benchmark on RTX 5090 (32GB VRAM):} Draft model prefill latency across increasing prompt context lengths up to $32\text{k}$ tokens. Uncompressed speculative decoding exhibits quadratic prefill scaling and crashes with CUDA Out of Memory at $32\text{k}$ tokens, whereas SPADE maintains a flat $\approx 25\text{ ms}$ prefill latency via fixed-budget sentence drafting.}
+\caption{\textbf{Draft Model Prefill Latency and Memory Scaling on RTX 5090 (PyTorch SDPA):} Benchmarking draft model (Qwen3-0.6B) prefill across sequence lengths up to $32\text{k}$ tokens. Uncompressed drafting scales from $27.35\text{ ms}$ to $941.31\text{ ms}$ and consumes $20.36\text{ GB}$ VRAM. In contrast, SPADE caps draft prompt length via fixed character budgeting, maintaining a flat $\approx 25.2\text{ ms}$ draft prefill latency and $2.1\text{ GB}$ peak VRAM.}
 \label{tab:long_context_scaling}
 \end{table}
