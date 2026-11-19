@@ -241,11 +241,11 @@ def _build_sentence_budget_evidence(
     for p_idx, e in enumerate(evidence):
         eid = str(e.get("evidence_id", f"E{p_idx+1}"))
         sents = pass_sents[p_idx]
-        if not sents:
-            out.append({"evidence_id": eid, "text": ""})
-        else:
+        if sents and chosen[p_idx]:
             sel_text = " ".join(sents[si] for si in sorted(chosen[p_idx]))
             out.append({"evidence_id": eid, "text": sel_text})
+        elif min_sentences_per_passage > 0:
+            out.append({"evidence_id": eid, "text": ""})
     return out
 
 
@@ -259,7 +259,9 @@ def build_draft_context_from_scores(
     compact_sentences: int = 1,
     compact_chars: int = 120,
     budget_chars: int = 8000,
+    min_sentences_per_passage: int = 1,
     extra_selection_s: float = 0.0,
+    seed: int = 42,
 ) -> DraftContextResult:
     """Build draft context from externally supplied zero-leakage scores (e.g. target prefill attention)."""
     claim = str(row.get("claim", ""))
@@ -290,6 +292,20 @@ def build_draft_context_from_scores(
             evidence,
             sentence_scores_by_passage=sentence_scores_by_passage,
             budget_chars=budget_chars,
+            min_sentences_per_passage=min_sentences_per_passage,
+        )
+    elif policy == "random_sentence_budget":
+        import random
+        claim_hash = sum(ord(c) for c in claim)
+        rng = random.Random(seed + claim_hash)
+        pass_sents_spans = [split_evidence_sentences_with_spans(str(e.get("text", ""))) for e in evidence]
+        rnd_scores = [[rng.random() for _ in spans] for spans in pass_sents_spans]
+        selected = _build_sentence_budget_evidence(
+            claim,
+            evidence,
+            sentence_scores_by_passage=rnd_scores,
+            budget_chars=budget_chars,
+            min_sentences_per_passage=min_sentences_per_passage,
         )
     else:
         raise ValueError(f"Unsupported scored policy: {policy!r}")
@@ -319,21 +335,26 @@ def build_draft_context(
     compact_sentences: int = 1,
     compact_chars: int = 160,
     budget_chars: int = 8000,
+    min_sentences_per_passage: int = 1,
+    seed: int = 42,
 ) -> DraftContextResult:
     """Construct draft prompt under the requested policy without touching target prompt or gold labels.
 
     Args:
         row: Prepared benchmark row containing 'claim', 'evidence', 'prompt', and 'evidence_mode'.
-        policy: One of {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget"}.
+        policy: One of {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget", "random_sentence_budget"}.
         top_k: Number of evidence passages retained under 'selective_topk' / 'hybrid_topk_compact'.
         compact_sentences: Number of claim-salient sentences kept per passage under 'compact' / tail.
         compact_chars: Character budget per compacted passage under 'compact' / tail.
-        budget_chars: Total character budget across all evidence under 'sentence_budget'.
+        budget_chars: Total character budget across all evidence under 'sentence_budget' / 'random_sentence_budget'.
+        min_sentences_per_passage: Minimum sentences retained per passage.
+        seed: Random seed for randomized baselines.
     """
-    if policy not in {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget"}:
+    valid_policies = {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget", "random_sentence_budget"}
+    if policy not in valid_policies:
         raise ValueError(f"Unsupported draft context policy: {policy!r}")
 
-    if policy in {"hybrid_topk_compact", "sentence_budget"}:
+    if policy in {"hybrid_topk_compact", "sentence_budget", "random_sentence_budget"}:
         return build_draft_context_from_scores(
             row,
             policy=policy,
@@ -341,6 +362,8 @@ def build_draft_context(
             compact_sentences=compact_sentences,
             compact_chars=compact_chars,
             budget_chars=budget_chars,
+            min_sentences_per_passage=min_sentences_per_passage,
+            seed=seed,
         )
 
     claim = str(row.get("claim", ""))

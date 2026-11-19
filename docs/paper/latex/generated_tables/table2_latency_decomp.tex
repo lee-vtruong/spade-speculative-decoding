@@ -1,0 +1,20 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccccc}
+\toprule
+\textbf{Decoding Method} & \textbf{Context Sel.} & \textbf{Target Prefill} & \textbf{Draft Prefill} & \textbf{Draft Decode} & \textbf{Target Verify} & \textbf{Correction} & \textbf{Loop/Unattr.} & \textbf{Residual} & \textbf{Total E2E (ms/tok)} & \textbf{$\Delta$ vs. Full} \\
+\midrule
+\textbf{B0-S (Target AR)} & 0.000 & 5.080 & 0.000 & 0.000 & 23.169 & 0.000 & 0.042 & -0.001 & \textbf{28.290} & +4.174 \\
+\textbf{Baseline Full} & 0.000 & 5.087 & 0.974 & 4.790 & 12.852 & 0.242 & 0.170 & +0.001 & \textbf{24.116} & — \\
+\textbf{BM25 Top-2} & 0.014 & 5.096 & 0.462 & 4.408 & 13.461 & 0.256 & 0.178 & -0.001 & \textbf{23.874} & -0.242 \\
+\textbf{BM25 Sent-B8k} & 0.049 & 5.080 & 0.410 & 4.314 & 13.138 & 0.252 & 0.181 & +0.000 & \textbf{23.424} & -0.692 \\
+\textbf{BM25 Sent-B10k} & 0.046 & 5.062 & 0.394 & 4.316 & 13.203 & 0.249 & 0.175 & +0.000 & \textbf{23.445} & -0.671 \\
+\textbf{SPADE (Ours)} & \textbf{0.163} & \textbf{5.052} & \textbf{0.353} & \textbf{4.224} & \textbf{12.894} & \textbf{0.246} & \textbf{0.172} & \textbf{+0.000} & \textbf{23.104} & \textbf{-1.012} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{100\% Additive End-to-End Latency Decomposition per Generated Token (ms/tok) across 300 Held-Out Claims:} Generated automatically from benchmark timing counters. Loop/Unattr.\ overhead accounts for Python iteration scheduling, GPU synchronization, StaticCache rollback pointer updates, and token sampling launches ($0.170\text{--}0.181\text{ ms/tok}$). Minor residual discrepancies ($\le 0.001\text{ ms/tok}$) arise strictly from three-decimal floating-point rounding. Accounting strictly satisfies $\sum \text{components} + \text{Residual} = \text{Total E2E}$ with zero gap.}
+\label{tab:additive_breakdown}
+\end{table*}

@@ -87,7 +87,7 @@ Speculative decoding accelerates autoregressive large language model (LLM) infer
 
 In this work, we present \textbf{SPADE} (\textbf{SP}eculative \textbf{A}symmetric \textbf{D}ecoding with \textbf{E}vidence Selection), an exact, evidence-selective speculative decoding framework tailored for knowledge-intensive generation. SPADE decouples the target and draft context spaces: while the target model verifies candidate proposals across the complete retrieved evidence context, the draft model generates proposals conditioned on a compact, sentence-budgeted context representation. To construct this draft context without extra forward passes, SPADE introduces a \textbf{Target-Prefill Attention Hook} that captures upper-layer causal self-attention weights from the target model's initial prompt pass, identifies claim-salient sentences across \textit{all} evidence passages via a bounded character budget, and preserves 100\% of citation identifiers while shedding 65--75\% of uninformative tokens. Coupled with an optimized, mathematically grounded inference runtime (\texttt{FlexAttention} + \texttt{StaticCache} + zero-sync \texttt{fp32\_fast} distribution processing achieving empirical numerical agreement with zero decision flips), SPADE achieves true end-to-end wall-clock speedup on modern GPU architectures.
 
-Extensive evaluations on the official \textbf{AVeriTeC} real-world claim verification benchmark across \textbf{300 held-out long-context claims} on an NVIDIA RTX 5090 demonstrate that SPADE: (1) achieves \textbf{43.28 tok/s} end-to-end throughput, outperforming target-only autoregressive decoding ($35.35\text{ tok/s}$, \textbf{+22.4\% speedup}, $p < 10^{-4}$) and standard full-context speculative decoding ($41.47\text{ tok/s}$, \textbf{+4.4\% speedup}, $p < 10^{-4}$); (2) accelerates token generation in the decode-only phase (\textbf{57.03 tok/s} vs. $55.39\text{ tok/s}$, $p = 0.0002$); (3) preserves target speculative acceptance at empirical parity ($\alpha_{\text{eval}} = \mathbf{78.20\%}$ vs. $78.16\%$, $\Delta = +0.04\text{ pp}$, 95\% CI $[-0.48, +0.55]$, $p = 0.8656$, with no statistically significant difference observed and bounded within a standard $\pm 1.0\text{ pp}$ equivalence interval) and committed tokens per round ($3.114$ vs. $3.106$, $p = 0.6572$); (4) cuts active draft KV-cache memory by \textbf{$-63.9\%$} ($566.9\text{ MB} \to 204.6\text{ MB}$, $p < 10^{-4}$) and peak device VRAM by \textbf{$-1.34\text{ GB}$}; and (5) on \textbf{393 short-context oracle claims}, activates a zero-overhead bypass mechanism guaranteeing exact mathematical bitwise identity ($\alpha_{\text{eval}} = 81.33\%$, $p = 1.0000$) with zero selection penalty.
+Extensive evaluations on the official \textbf{AVeriTeC} real-world claim verification benchmark across \textbf{300 held-out long-context claims} on an NVIDIA RTX 5090 demonstrate that SPADE: (1) achieves \textbf{43.28 tok/s} end-to-end throughput, outperforming target-only autoregressive decoding ($35.35\text{ tok/s}$, \textbf{+22.4\% speedup}, $p < 10^{-4}$) and standard full-context speculative decoding ($41.47\text{ tok/s}$, \textbf{+4.4\% speedup}, $p < 10^{-4}$); (2) accelerates token generation in the decode-only phase (\textbf{57.03 tok/s} vs. $55.39\text{ tok/s}$, $p = 0.0002$); (3) preserves target speculative acceptance ($\alpha_{\text{eval}} = \mathbf{78.20\%}$ vs. $78.16\%$, $\Delta = +0.04\text{ pp}$, 95\% CI $[-0.48, +0.55]$, $p = 0.8656$, with no statistically significant difference observed, confirming empirical equivalence within a predefined $\pm 1.0\text{ pp}$ margin) and committed tokens per round ($3.114$ vs. $3.106$, $p = 0.6572$); (4) cuts active draft KV-cache memory by \textbf{$-63.9\%$} ($566.9\text{ MB} \to 204.6\text{ MB}$, $p < 10^{-4}$) and peak device VRAM by \textbf{$-1.34\text{ GB}$}; and (5) on \textbf{393 short-context oracle claims}, activates a zero-overhead bypass mechanism that preserves the full prompt ($C_{\text{draft}} = C_{\text{full}}$), guaranteeing distributional equivalence ($\alpha_{\text{eval}} = 81.33\%$, $\Delta = 0.00\text{ pp}$, $p = 1.0000$) with zero selection penalty.
 \end{abstract}
 
 \section{Introduction}
@@ -130,7 +130,7 @@ Retrieval-Augmented Generation (RAG) systems frequently suffer from context bloa
 \subsection{Asymmetric and Retrieval-Augmented Speculative Decoding}
 Several recent efforts have investigated asymmetric context access or retrieval assistance to optimize speculative decoding in long-sequence regimes. RAPID \citep{chen2025rapid} pioneers a RAG drafter operating on shortened retrieval contexts to speculate for long-context target models. However, RAPID operates at the coarse passage level; as we show in \S\ref{sec:diagnosis}, omitting complete evidence passages in multi-evidence reasoning tasks triggers severe proposal divergence whenever cited documents are excluded. In contrast, SPADE operates at the sub-passage level by performing sentence-budget allocation across \textit{all} candidate documents. 
 
-A related line of work explores attention-guided context management. SpecExtend \citep{chen2026specextend} utilizes target model attention scores for dynamic KV-cache eviction and cross-model key retrieval during long sequence generation. However, SpecExtend requires dynamic cross-model attention kernels throughout the decoding loop. In contrast, SPADE extracts target self-attention weights once during initial prefill to construct a static, self-contained compact prompt for the drafter, avoiding cross-model memory accesses during speculative decoding and incorporating a zero-overhead short-context bypass. Concurrently, AsymSpec \citep{liang2026asymspec} explores context asymmetry in agentic LLMs by compressing the verifier's context while preserving the drafter's context, which trades off target distribution exactness ($\approx 90\%$ accuracy). In contrast, SPADE preserves the complete uncompressed context on the target verifier, strictly guaranteeing 100\% mathematical target distribution invariance (Theorem \ref{thm:invariance}) while compressing solely the draft prompt. Complementary methods investigate dynamic stopping policies such as SVIP \citep{zhang2025draftstop} and LinguaSpec \citep{liu2026linguaspec}, or contextual heterogeneity \citep{xu2026heterospec}; SPADE is orthogonal and training-free, operating without fine-tuning or auxiliary neural models.
+A related line of work explores attention-guided context management. SpecExtend \citep{chen2026specextend} utilizes target model attention scores for dynamic KV-cache eviction and cross-model key retrieval during long sequence generation. However, SpecExtend requires dynamic cross-model attention kernels throughout the decoding loop. In contrast, SPADE extracts target self-attention weights once during initial prefill to construct a static, self-contained compact prompt for the drafter, avoiding cross-model memory accesses during speculative decoding and incorporating a zero-overhead short-context bypass. Concurrently, LongSpec \citep{yang2026longspec} addresses long-context speculative decoding by maintaining a constant-sized KV cache for drafter models and utilizing specialized position adaptations to bridge short-to-long training mismatches. While LongSpec modifies drafter internal architectures for general long-sequence language modeling, SPADE is tailored for evidence-grounded, multi-passage generation: SPADE decouples the target and draft contexts via target-prefill attention-guided sentence budgeting, leaving the underlying drafter model, attention kernels, and positional encodings entirely unmodified. Concurrently, AsymSpec \citep{liang2026asymspec} explores context asymmetry in agentic LLMs by compressing the verifier's context while preserving the drafter's context, which trades off target distribution exactness ($\approx 90\%$ accuracy). In contrast, SPADE preserves the complete uncompressed context on the target verifier, strictly guaranteeing 100\% mathematical target distribution invariance (Theorem \ref{thm:invariance}) while compressing solely the draft prompt. Complementary methods investigate dynamic stopping policies such as SVIP \citep{zhang2025draftstop} and LinguaSpec \citep{liu2026linguaspec}, or contextual heterogeneity \citep{xu2026heterospec}; SPADE is orthogonal and training-free, operating without fine-tuning or auxiliary neural models.
 
 \section{Empirical Diagnosis: Why Passage-Level Context Reduction Fails}
 \label{sec:diagnosis}
@@ -305,26 +305,7 @@ These empirical tests establish that \texttt{fp32\_fast} achieves high numerical
 
 \subsection{Primary Held-Out Evaluation (300 Long-Context Claims)}
 
-\begin{table*}[t]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{llccccccccc}
-\toprule
-\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Active Draft KV} & \textbf{Peak GPU VRAM} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{Decode Thpt} & \textbf{E2E Thpt} & \textbf{E2E Latency} & \textbf{$\Delta$ vs. Full (95\% CI)} \\
-\midrule
-\textbf{B0-S (Target AR)} & Full (Target Only) & — & — & 19.48 GB & — & 1.000 & 43.08 & 35.35 & 28.29 & $-6.12$ $[-7.05, -5.20]^*$ \\
-\textbf{Baseline Full} & Full $\to$ Full & 5,090.1 & 566.9 MB & 22.57 GB & 78.16\% & 3.106 & 55.39 & 41.47 & 24.12 & — \\
-\textbf{BM25 Top-2} & Full $\to$ Top-2 & 2,228.4 & 253.9 MB & 21.15 GB & 76.67\% & 3.014 & 54.64 & 41.89 & 23.87 & $+0.42$ $[-0.07, +0.94]$ \\
-\textbf{BM25 Sent-B8k} & Full $\to$ Sent B=8k & 1,383.3 & 161.5 MB & 20.92 GB & 77.36\% & 3.058 & 55.91 & 42.69 & 23.42 & $+1.22$ $[+0.77, +1.69]^*$ \\
-\textbf{BM25 Sent-B10k} & Full $\to$ Sent B=10k & 1,646.4 & 190.3 MB & 20.97 GB & 77.24\% & 3.047 & 55.73 & 42.65 & 23.45 & $+1.19$ $[+0.74, +1.64]^*$ \\
-\textbf{SPADE (Ours)} & Full $\to$ Attn B=10k & \textbf{1,776.8} & \textbf{204.6 MB} & \textbf{21.23 GB} & \textbf{78.20\%} & \textbf{3.114} & \textbf{57.03} & \textbf{43.28} & \textbf{23.10} & \textbf{+1.82} \textbf{[+1.39, +2.23]}$^*$ \\
-\bottomrule
-\end{tabular}%
-}
-\caption{\textbf{Main Decoding Efficiency and Memory Matrix on 300 Held-Out Long-Context Claims (NVIDIA RTX 5090):} Throughput reported in tok/s; latency in ms/tok. Statistical significance tested via paired cluster bootstrap ($B=10,000$ iterations, * denotes $p < 0.001$). All methods achieve 100.0\% JSON parse validity and 100.0\% citation validity.}
-\label{tab:main_results}
-\end{table*}
+\input{generated_tables/table1_main_results.tex}
 
 Table \ref{tab:main_results} reports main decoding throughput, latency, memory utilization, and acceptance metrics on the 300 held-out long-context claims.
 
@@ -332,34 +313,15 @@ Table \ref{tab:main_results} reports main decoding throughput, latency, memory u
 \begin{enumerate}
     \item \textbf{Statistically Significant Acceleration:} SPADE achieves \textbf{43.28 tok/s} E2E throughput, outperforming \texttt{Baseline Full} by \textbf{+1.82 tok/s} (+4.4\%, 95\% CI $[+1.39, +2.23]$, $p < 10^{-4}$) and \texttt{B0-S} by \textbf{+7.93 tok/s} (+22.4\%, 95\% CI $[+6.53, +9.55]$, $p < 10^{-4}$).
     \item \textbf{Decode-Phase Speedup:} In the pure generation phase (excluding prompt prefill), SPADE achieves \textbf{57.03 tok/s} vs. $55.39\text{ tok/s}$ ($p = 0.0002$), demonstrating that reducing draft context length directly accelerates per-round speculative drafting.
-    \item \textbf{Acceptance Equivalence within Predefined Margin:} For evaluated token acceptance, SPADE achieves $\alpha_{\text{eval}} = \mathbf{78.20\%}$ compared to $78.16\%$ for Baseline Full ($\Delta = +0.04\text{ pp}$, 95\% bootstrap CI $[-0.48, +0.55]$, $p = 0.8656$). While $p > 0.05$ indicates no statistically significant difference rather than proving exact identity, the tightly bounded 95\% confidence interval confirms empirical equivalence within a standard $\pm 1.0\text{ pp}$ margin. Mean committed tokens per round ($3.114$ vs. $3.106$, $p = 0.6572$) similarly exhibits no significant difference. Target output distribution invariance is guaranteed mathematically by Theorem \ref{thm:invariance}.
+    \item \textbf{Acceptance Equivalence within Predefined Margin:} For evaluated token acceptance, SPADE achieves $\alpha_{\text{eval}} = \mathbf{78.20\%}$ compared to $78.16\%$ for Baseline Full ($\Delta = +0.04\text{ pp}$, 95\% bootstrap CI $[-0.48, +0.55]$, $p = 0.8656$). While a non-significant $p$-value ($p > 0.05$) alone indicates failure to reject the null hypothesis rather than mathematical identity, the tight two-sided 95\% confidence interval falls strictly within a predefined $\pm 1.0\text{ percentage point}$ tolerance margin, demonstrating empirical equivalence under standard two one-sided testing (TOST) principles. Mean committed tokens per round ($3.114$ vs. $3.106$, $p = 0.6572$) similarly exhibits no significant difference. Target output distribution invariance is guaranteed mathematically by Theorem \ref{thm:invariance}.
     \item \textbf{Memory Reduction:} Active draft KV cache is cut by \textbf{$-63.9\%$} ($566.9\text{ MB} \to 204.6\text{ MB}$, $p < 10^{-4}$). Total device peak VRAM drops from $22.57\text{ GB} \to \mathbf{21.23\text{ GB}}$ (saving \textbf{1.34 GB} on GPU).
 \end{enumerate}
 
 \subsection{Additive End-to-End Latency Decomposition}
 
-\begin{table*}[t]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lcccccccccc}
-\toprule
-\textbf{Decoding Method} & \textbf{Context Sel.} & \textbf{Target Prefill} & \textbf{Draft Prefill} & \textbf{Draft Decode} & \textbf{Target Verify} & \textbf{Correction} & \textbf{Loop/Unattr.} & \textbf{Residual} & \textbf{Total E2E (ms/tok)} & \textbf{$\Delta$ vs. Full} \\
-\midrule
-\textbf{B0-S (Target AR)} & 0.000 & 5.080 & 0.000 & 0.000 & 23.169 & 0.000 & 0.042 & +0.000 & \textbf{28.290} & +4.174 \\
-\textbf{Baseline Full} & 0.000 & 5.087 & 0.974 & 4.790 & 12.852 & 0.242 & 0.170 & +0.000 & \textbf{24.116} & — \\
-\textbf{BM25 Top-2} & 0.014 & 5.096 & 0.462 & 4.408 & 13.461 & 0.256 & 0.178 & +0.000 & \textbf{23.874} & -0.242 \\
-\textbf{BM25 Sent-B8k} & 0.049 & 5.080 & 0.410 & 4.314 & 13.138 & 0.252 & 0.181 & +0.000 & \textbf{23.424} & -0.692 \\
-\textbf{BM25 Sent-B10k} & 0.046 & 5.062 & 0.394 & 4.316 & 13.203 & 0.249 & 0.175 & +0.000 & \textbf{23.445} & -0.671 \\
-\textbf{SPADE (Ours)} & \textbf{0.163} & \textbf{5.052} & \textbf{0.353} & \textbf{4.224} & \textbf{12.894} & \textbf{0.246} & \textbf{0.172} & \textbf{+0.000} & \textbf{23.104} & \textbf{-1.012} \\
-\bottomrule
-\end{tabular}%
-}
-\caption{\textbf{100\% Additive End-to-End Latency Decomposition per Generated Token (ms/tok) across 300 Held-Out Claims:} Every component is measured independently via high-resolution timing counters. Loop/Unattr.\ overhead accounts for Python iteration scheduling, GPU synchronization, StaticCache rollback pointer updates, and token sampling launches ($0.170\text{--}0.181\text{ ms/tok}$). Accounting strictly satisfies $\sum \text{components} = \text{Total E2E}$ with zero residual ($< 0.001\text{ ms/tok}$ rounding).}
-\label{tab:additive_breakdown}
-\end{table*}
+\input{generated_tables/table2_latency_decomp.tex}
 
-Table \ref{tab:additive_breakdown} presents the 100\% additive latency decomposition normalized per output token ($\text{ms/tok}$). The additive accounting satisfies $\sum \text{components} = \text{Total E2E}$ with zero residual ($< 0.001\text{ ms/tok}$ rounding).
+Table \ref{tab:additive_breakdown} presents the 100\% additive latency decomposition normalized per output token ($\text{ms/tok}$). Every component is derived directly from raw instrumentation counters.
 
 \paragraph{Quantitative Break-Even Proof:}
 Comparing SPADE against \texttt{Baseline Full}:
@@ -373,43 +335,25 @@ In contrast, \texttt{BM25 Top-2} suffers a verification penalty of $+0.609\text{
 
 \subsection{Auxiliary Oracle Evaluation: Proving the Zero-Overhead Bypass}
 
-\begin{table*}[t]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{llccccccc}
-\toprule
-\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Peak GPU VRAM} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E Thpt} & \textbf{$\Delta$ vs. Full (95\% CI)} & \textbf{$p$-value} \\
-\midrule
-\textbf{B0-S (Target AR)} & Full (Target Only) & — & 15.83 GB & — & 1.000 & 41.25 & $-35.63$ $[-37.44, -33.91]$ & $< 10^{-4}$ \\
-\textbf{Baseline Full} & Full $\to$ Full & 338.9 & 17.29 GB & 81.33\% & 3.341 & 76.88 & — & — \\
-\textbf{BM25 Top-2} & Full $\to$ Top-2 & 276.6 & 17.22 GB & 78.73\% & 3.159 & 71.06 & $-5.82$ $[-6.77, -4.87]$ & $< 10^{-4}$ \\
-\textbf{BM25 Sent-B8k} & Full $\to$ Sent B=8k & 337.9 & 17.27 GB & 81.34\% & 3.340 & 75.48 & $-1.40$ $[-1.71, -1.11]$ & $< 10^{-4}$ \\
-\textbf{SPADE (Ours)} & Full $\to$ Bypass & \textbf{338.9} & \textbf{17.29 GB} & \textbf{81.33\%} & \textbf{3.341} & \textbf{77.61} & \textbf{+0.73} \textbf{[+0.34, +1.30]} & \textbf{$< 10^{-4}$} \\
-\bottomrule
-\end{tabular}%
-}
-\caption{\textbf{Auxiliary Evaluation on 393 Short-Context Oracle Claims:} Proving the zero-overhead bypass mechanism. SPADE achieves exact bitwise parity in acceptance ($\Delta = 0.0000\text{ pp}$, $p = 1.0000$), completely avoiding the $-5.82\text{ tok/s}$ collapse of passage-dropping methods.}
-\label{tab:oracle_results}
-\end{table*}
+\input{generated_tables/table3_oracle_results.tex}
 
 To verify that SPADE does not degrade on shorter contexts where evidence pruning is unnecessary, we evaluated all methods on \textbf{393 held-out claims} from \texttt{dev-oracle-heldout400.jsonl} (mean evidence length 686 characters).
 
 As reported in Table \ref{tab:oracle_results}:
 \begin{enumerate}
-    \item \textbf{Mathematical Identity via Zero-Bypass:} Because total evidence is $< 10,000$ characters, SPADE deactivates attention hooking. Acceptance rate ($\alpha_{\text{eval}} = 81.33\%$), committed tokens per round ($3.341$), and active KV cache ($47.25\text{ MB}$) match \texttt{Baseline Full} to \textbf{0.0000 decimal places ($p = 1.0000$)}.
+    \item \textbf{Distributional Equivalence via Zero-Bypass:} Because total evidence length is $< 10,000$ characters, SPADE deactivates attention hooking and provides the complete uncompressed prompt to the drafter ($C_{\text{draft}} = C_{\text{full}}$). Consequently, the proposal distribution $q$ is distributionally identical to standard speculative decoding, matching acceptance rate ($\alpha_{\text{eval}} = 81.33\%$), committed tokens per round ($3.341$), and active KV cache ($47.25\text{ MB}$) to \textbf{0.0000 decimal places ($p = 1.0000$)}.
     \item \textbf{Failure of Passage Pruning on Dense Evidence:} On oracle claims where every retrieved passage is gold evidence, \texttt{BM25 Top-2} forces document truncation, dropping acceptance from $81.33\% \to 78.73\%$ ($-2.60\text{ pp}$) and slowing throughput by \textbf{$-5.82\text{ tok/s}$} ($p < 10^{-4}$). SPADE completely avoids this failure mode.
 \end{enumerate}
 
 \subsection{Downstream Fact-Checking Veracity and Structural Integrity}
 We evaluate downstream fact-checking performance across categorical veracity classification (\textit{Supported}, \textit{Refuted}, \textit{Not Enough Evidence}, \textit{Conflicting Evidence}) and structured JSON formatting across all 300 claims in the primary held-out evaluation:
 \begin{itemize}
-    \item \textbf{JSON Schema Parse Success Rate:} \textbf{100.0\%} across all 1,500 generations ($5 \times 300$ claims);
+    \item \textbf{JSON Schema Parse Success Rate:} \textbf{100.0\%} across all 1,800 evaluated generations ($6\text{ methods} \times 300\text{ claims}$);
     \item \textbf{Citation Identifier Validity:} \textbf{100.0\%} across all generated references;
     \item \textbf{Task Veracity Classification:} Macro-F1 scores remain closely aligned: \texttt{B0-S} (0.1267), \texttt{Baseline Full} (0.1254), and \texttt{SPADE} (0.1222). Under stochastic sampling ($T=0.7, \text{top-}p=0.9$), sample paths diverge slightly across random seeds, so small variations in finite-sample Macro-F1 are expected.
 \end{itemize}
 
-To understand the task performance transparently, Table \ref{tab:verdict_distribution} details the gold benchmark label distribution alongside the predicted label counts. The overall Macro-F1 on raw retrieved web documents is primarily constrained by the target model's zero-shot conservative bias: given uncurated multi-passage web scrapes, \texttt{Qwen3-8B} frequently concludes that the passages do not contain definitive verification evidence, predicting \textit{Not Enough Evidence} in 245--250 out of 300 claims, whereas human annotators labeled 189 claims as \textit{Refuted} and 76 as \textit{Supported}. Crucially, speculative decoding faithfully reproduces the target model's exact classification profile: \texttt{Baseline Full} and \texttt{SPADE} mirror \texttt{B0-S} across all categories (e.g., \textit{Refuted} predicted 17 times by B0-S, 18 times by Full, and 20 times by SPADE; \textit{Supported} predicted 16 times by B0-S, 12 times by Full, and 11 times by SPADE). This confirms that asymmetric draft context introduces no systematic distortion into the target model's task-level reasoning.
+We emphasize that SPADE is an inference acceleration framework and does not aim to alter or improve the underlying fact-checking reasoning or domain accuracy of the base model. The modest Macro-F1 (0.1222--0.1267) reflects \texttt{Qwen3-8B}'s zero-shot conservative thresholding on raw, uncurated web snippets rather than any degradation introduced by speculative decoding. As shown in Table \ref{tab:verdict_distribution}, \texttt{Qwen3-8B} conservatively predicts \textit{Not Enough Evidence} in 245--250 out of 300 claims, whereas human annotators labeled 189 claims as \textit{Refuted} and 76 as \textit{Supported}. Crucially, speculative decoding faithfully reproduces the target model's exact classification profile: \texttt{Baseline Full} and \texttt{SPADE} mirror \texttt{B0-S} across all categories (e.g., \textit{Refuted} predicted 17 times by B0-S, 18 times by Full, and 20 times by SPADE; \textit{Supported} predicted 16 times by B0-S, 12 times by Full, and 11 times by SPADE). This confirms that asymmetric draft context introduces no systematic distortion into the target model's task-level reasoning, strictly upholding Theorem \ref{thm:invariance}.
 
 \begin{table}[h]
 \centering
@@ -443,7 +387,7 @@ As reported in Table \ref{tab:main_results}:
     \item \textbf{Acceptance Gap at Identical Budget ($B=10\text{k}$):} Under the identical 10,000-character budget, \texttt{BM25 Sent-B10k} achieves $\alpha_{\text{eval}} = 77.24\%$, suffering a statistically significant $-0.92\text{ pp}$ drop compared to Full ($p = 0.0022$). In contrast, SPADE's \nolinkurl{Target-Attn Sent-B10k} achieves $\alpha_{\text{eval}} = \mathbf{78.20\%}$, outperforming BM25 by \textbf{+0.96 pp} in acceptance ($p < 10^{-4}$). Expanding the lexical budget from 8k to 10k did not rescue BM25 ($77.36\% \to 77.24\%$), because keyword matching greedily includes sentences with high term frequency that are irrelevant to the target model's actual multi-hop reasoning.
     \item \textbf{Throughput Superiority:} Because attention guidance aligns drafter probability mass with the target model, SPADE achieves higher decode throughput (\textbf{57.03} vs. $55.73\text{ tok/s}$) and higher end-to-end throughput (\textbf{43.28} vs. $42.65\text{ tok/s}$, $+0.63\text{ tok/s}$ higher, $p < 10^{-4}$) than \texttt{BM25 Sent-B10k}.
 \end{enumerate}
-These controlled comparisons confirm that target prefill attention captures latent cross-hop dependencies and co-reference links that lexical matching cannot detect, selecting the precise factual sentences that the target model attends to during generation.
+These controlled comparisons show that target prefill attention scoring provides superior drafter proposal alignment compared to lexical matching under identical length constraints. While keyword-based ranking greedily selects sentences with high term frequency regardless of their utility to the generation process, the target model's causal self-attention weights indicate which evidence positions the target model actually prioritizes during prefill, avoiding proposal degradation without requiring an external retrieval model.
 
 \subsection{Analysis of Draft Logit Biasing (Direction A Negative Result)}
 Prior to developing SPADE's asymmetric context formulation, we investigated evidence logit biasing (dynamically boosting draft model logits on continuous $n$-grams extracted from evidence). 

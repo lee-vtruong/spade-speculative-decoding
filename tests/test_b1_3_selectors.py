@@ -204,3 +204,30 @@ def test_qwen_pair_target_attn_sentence_budget_e2e():
     n_res = sum(1 for t in gen.token_traces if t["status"] == "residual_replacement")
     n_bon = sum(1 for t in gen.token_traces if t["status"] == "extra_target_token")
     assert n_acc + n_res + n_bon == len(gen.token_ids) == 10
+
+
+def test_random_sentence_budget_and_nocoverage_ablation():
+    row = _sample_multi_evidence_row()
+
+    # 1. Random sentence budget with coverage
+    r1 = build_draft_context(row, policy="random_sentence_budget", budget_chars=200, min_sentences_per_passage=1, seed=42)
+    assert r1.selected_evidence_ids == ["E1", "E2", "E3", "E4"]
+    assert r1.draft_evidence_chars <= 200
+    assert r1.draft_prompt != ""
+
+    # Determinism with same seed
+    r1_repeat = build_draft_context(row, policy="random_sentence_budget", budget_chars=200, min_sentences_per_passage=1, seed=42)
+    assert r1.draft_prompt == r1_repeat.draft_prompt
+
+    # Different seed yields different draft prompt
+    r2 = build_draft_context(row, policy="random_sentence_budget", budget_chars=200, min_sentences_per_passage=1, seed=999)
+    assert r1.draft_prompt != r2.draft_prompt
+
+    # 2. No-coverage ablation (min_sentences_per_passage = 0)
+    # With a small budget, low-scoring passages will be dropped
+    r_bm25_nocov = build_draft_context(row, policy="sentence_budget", budget_chars=120, min_sentences_per_passage=0)
+    assert len(r_bm25_nocov.selected_evidence_ids) < 4
+    # The high-salience passage E2 should definitely be retained
+    assert "E2" in r_bm25_nocov.selected_evidence_ids
+    assert r_bm25_nocov.draft_evidence_chars <= 120
+

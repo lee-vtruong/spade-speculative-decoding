@@ -570,10 +570,12 @@ class QwenPair:
         attn_row_meta: dict[str, Any] | None = None
         attn_ev_list: list[dict[str, Any]] = []
         attn_budget_chars = 10000
+        attn_min_sentences = 1
         if use_target_attn_sel:
             assert target_attn_selector_cfg is not None
             attn_row_meta = target_attn_selector_cfg["row"]
             attn_budget_chars = int(target_attn_selector_cfg.get("budget_chars", 10000))
+            attn_min_sentences = int(target_attn_selector_cfg.get("min_sentences_per_passage", 1))
             attn_ev_list = list(attn_row_meta.get("evidence") or [])
             attn_full_chars = sum(len(str(e.get("text", ""))) for e in attn_ev_list)
             attn_needs_hook = bool(attn_ev_list) and (attn_full_chars > attn_budget_chars)
@@ -612,6 +614,7 @@ class QwenPair:
                     policy="sentence_budget",
                     sentence_scores_by_passage=s_scores,
                     budget_chars=attn_budget_chars,
+                    min_sentences_per_passage=attn_min_sentences,
                 )
                 dtok = self.draft_tokenizer or self.target_tokenizer
                 ser_d = format_qwen_prompt(dtok, attn_dctx.draft_prompt)
@@ -640,6 +643,7 @@ class QwenPair:
                     policy="sentence_budget",
                     sentence_scores_by_passage=None,
                     budget_chars=attn_budget_chars,
+                    min_sentences_per_passage=attn_min_sentences,
                 )
                 draft_base_ids = prompt_ids
                 if draft_runner is not None and len(draft_base_ids) + max_new_tokens >= draft_runner.max_cache_len:

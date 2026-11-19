@@ -1,0 +1,19 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccccc}
+\toprule
+\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Peak GPU VRAM} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E Thpt} & \textbf{$\Delta$ vs. Full (95\% CI)} & \textbf{$p$-value} \\
+\midrule
+\textbf{B0-S (Target AR)} & Full (Target Only) & — & 15.83 GB & — & 1.000 & \textbf{41.25} & -35.63 [-36.56, -34.63] & $< 10^{-4}$ \\
+\textbf{Baseline Full} & Full $\to$ Full & 338.9 & 17.29 GB & 81.33\% & 3.341 & \textbf{76.88} & — & — \\
+\textbf{BM25 Top-2} & Full $\to$ Top-2 & 276.6 & 17.22 GB & 78.73\% & 3.159 & \textbf{71.06} & -5.82 [-6.77, -4.87] & $< 10^{-4}$ \\
+\textbf{BM25 Sent-B8k} & Full $\to$ Sent B=8k & 337.9 & 17.27 GB & 81.34\% & 3.340 & \textbf{75.48} & -1.40 [-1.71, -1.11] & $< 10^{-4}$ \\
+\textbf{SPADE (Ours)} & Full $\to$ Bypass & \textbf{338.9} & \textbf{17.29 GB} & \textbf{81.33\%} & \textbf{3.341} & \textbf{\textbf{77.61}} & \textbf{+0.73 [+0.34, +1.30]} & \textbf{$< 10^{-4}$} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Auxiliary Evaluation on 393 Short-Context Oracle Claims:} Proving the zero-overhead bypass mechanism. SPADE achieves exact distributional parity in acceptance ($\Delta = 0.0000\text{ pp}$, $p = 1.0000$), completely avoiding the $-5.82\text{ tok/s}$ collapse of passage-dropping methods.}
+\label{tab:oracle_results}
+\end{table*}
