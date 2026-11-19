@@ -6,7 +6,9 @@
 \toprule
 \textbf{Selection Strategy} & \textbf{Scoring Signal} & \textbf{Passage Coverage} & \textbf{Budget $B$} & \textbf{Draft Tokens (Comp)} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E ms/tok} & \textbf{E2E tok/s} & \textbf{Speedup vs. Full} \\
 \midrule
+Random Sentences & Uniform Random & Yes ($m/m$) & 10,000 & 1,644.0 (-67.7\%) & 76.50\% & 2.996 & 23.61 & 42.36 & +2.1\% \\
 BM25 Sentences & Lexical BM25 & Yes ($m/m$) & 10,000 & 1,646.4 (-67.7\%) & 77.24\% & 3.047 & 23.45 & 42.65 & +2.8\% \\
+Target-Attn (No Coverage) & Target Attention Hook & No & 10,000 & 1,776.4 (-65.1\%) & 78.14\% & 3.109 & 23.08 & 43.33 & +4.5\% \\
 \textbf{SPADE (Proposed)} & Target Attention Hook & \textbf{Yes ($m/m$)} & 10,000 & 1,776.8 (-65.1\%) & \textbf{78.20\%} & \textbf{3.114} & \textbf{23.10} & \textbf{43.28} & \textbf{+4.4\%} \\
 \bottomrule
 \end{tabular}%

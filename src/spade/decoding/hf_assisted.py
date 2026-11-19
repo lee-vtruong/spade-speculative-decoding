@@ -64,6 +64,14 @@ class QwenPair:
                 dtype=dtype,
                 attn_implementation=draft_attn_implementation,
             )
+            t_v = getattr(self.target.config, "vocab_size", None)
+            d_v = getattr(self.draft.config, "vocab_size", None)
+            if t_v is not None and d_v is not None and t_v != d_v:
+                self.common_vocab_size = min(t_v, d_v)
+            else:
+                self.common_vocab_size = None
+        else:
+            self.common_vocab_size = None
 
     def prepare_draft_runner(self, *, mode: str, max_cache_len: int, warmup_steps: int = 3) -> RunnerSetupTimings:
         """Initialize and warm up a reusable StaticDraftRunner strictly outside timed claim loops."""
@@ -535,8 +543,11 @@ class QwenPair:
         draft_runner = getattr(self, "draft_runner", None) if (self.draft is not None and mode not in {"B0", "B0-S"}) else None
         use_fast_dist = distribution_mode == "fp32_fast"
         attn_dctx = None
+        common_vocab = getattr(self, "common_vocab_size", None)
 
         def _dist1(lg: torch.Tensor) -> torch.Tensor:
+            if common_vocab is not None and lg.shape[-1] > common_vocab:
+                lg = lg[..., :common_vocab]
             if use_fast_dist:
                 return processed_distribution_fast(lg, temperature=temperature, top_k=top_k, top_p=top_p, dtype=torch.float32)
             return processed_distribution(lg, temperature, top_k, top_p)
@@ -789,17 +800,19 @@ class QwenPair:
                     t_stack = tout.logits[0, : len(proposed) + 1].float()
                 else:
                     t_stack = torch.cat([next_target_logits.unsqueeze(0), tout.logits[0, : len(proposed)].float()], dim=0)
+                if common_vocab is not None and t_stack.shape[-1] > common_vocab:
+                    t_stack = t_stack[:, :common_vocab]
                 batched_p = processed_distribution_fast(t_stack, temperature=temperature, top_k=top_k, top_p=top_p, dtype=torch.float32)
                 p_dists = [batched_p[i] for i in range(len(proposed))]
                 target_extra = batched_p[len(proposed)]
             elif has_pending:
-                p_dists = [processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p) for i in range(len(proposed))]
-                target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
+                p_dists = [_dist1(tout.logits[0, i].float()) for i in range(len(proposed))]
+                target_extra = _dist1(tout.logits[0, -1].float())
             else:
-                p_dists = [processed_distribution(next_target_logits, temperature, top_k, top_p)]
+                p_dists = [_dist1(next_target_logits)]
                 for i in range(len(proposed) - 1):
-                    p_dists.append(processed_distribution(tout.logits[0, i].float(), temperature, top_k, top_p))
-                target_extra = processed_distribution(tout.logits[0, -1].float(), temperature, top_k, top_p)
+                    p_dists.append(_dist1(tout.logits[0, i].float()))
+                target_extra = _dist1(tout.logits[0, -1].float())
 
             # Verification logic
             c0 = time.perf_counter()
@@ -837,7 +850,7 @@ class QwenPair:
                     status = ["accepted"] * len(accepted) + ["discarded_after_rejection"] * (len(proposed) - len(accepted))
                 extra = None
                 if rejection is None and len(accepted) == len(proposed) and len(accepted) < remaining and (not accepted or accepted[-1] != target_eos):
-                    extra = int(torch.argmax(tout.logits[0, -1]).item())
+                    extra = int(torch.argmax(tout.logits[0, -1, :common_vocab]).item())
                     accepted.append(extra)
                 generated.extend(accepted)
                 accepted_draft = sum(s == "accepted" for s in status)

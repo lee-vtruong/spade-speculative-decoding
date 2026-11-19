@@ -374,25 +374,31 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
+    pfx = args.run_prefix.rstrip("-") + "-"
     arm_specs = [
-        ("b0s", "B0-S (Target AR)", f"{args.run_prefix}-b0s"),
-        ("full", "Baseline Full", f"{args.run_prefix}-baseline-full"),
-        ("topk2", "BM25 Top-2", f"{args.run_prefix}-selective-topk2"),
-        ("compact", "Compact (1s/200c)", f"{args.run_prefix}-compact"),
-        ("bm25_sent_b8k", "BM25 Sent-B8k", f"{args.run_prefix}-bm25-sent-b8k"),
-        ("bm25_sent_b10k", "BM25 Sent-B10k", f"{args.run_prefix}-bm25-sent-b10k"),
-        ("random_sent_b10k", "Random Sent-B10k", f"{args.run_prefix}-random-sent-b10k"),
-        ("attn_sent_b10k_nocov", "SPADE NoCoverage", f"{args.run_prefix}-attn-sent-b10k-nocoverage"),
-        ("attn_sent_b10k", "SPADE (Attn Sent-B10k)", f"{args.run_prefix}-attn-sent-b10k"),
+        ("b0s", "B0-S (Target AR)", [f"{pfx}b0s"]),
+        ("full", "Baseline Full", [f"{pfx}full", f"{pfx}baseline-full"]),
+        ("topk2", "BM25 Top-2", [f"{pfx}topk2", f"{pfx}selective-topk2"]),
+        ("compact", "Compact (1s/200c)", [f"{pfx}compact"]),
+        ("bm25_sent_b8k", "BM25 Sent-B8k", [f"{pfx}bm25-sent-b8k"]),
+        ("bm25_sent_b10k", "BM25 Sent-B10k", [f"{pfx}bm25-sent-b10k"]),
+        ("random_sent_b10k", "Random Sent-B10k", [f"{pfx}random-sent-b10k"]),
+        ("attn_sent_b10k_nocov", "SPADE NoCoverage", [f"{pfx}attn-sent-b10k-nocoverage", f"{pfx}spade-nocoverage"]),
+        ("attn_sent_b10k", "SPADE (Ours)", [f"{pfx}spade", f"{pfx}attn-sent-b10k"]),
     ]
 
     arms: list[dict[str, Any]] = []
     cmaps: dict[str, dict[str, dict[str, Any]]] = {}
-    for key, label, run_id in arm_specs:
-        rdir = args.runs_root / run_id
-        if not rdir.exists():
+    for key, label, candidates in arm_specs:
+        matched_dir = None
+        for cand in candidates:
+            rdir = args.runs_root / cand
+            if rdir.exists():
+                matched_dir = rdir
+                break
+        if matched_dir is None:
             continue
-        row, cmap = _summarize_arm(label, key, rdir)
+        row, cmap = _summarize_arm(label, key, matched_dir)
         arms.append(row)
         cmaps[key] = cmap
 

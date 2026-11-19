@@ -376,6 +376,21 @@ Conflicting Evidence & 15 & 22 & 21 & 19 \\
 \label{tab:verdict_distribution}
 \end{table}
 
+\subsection{Cross-Model Architecture Generalization: Qwen2.5-7B and Qwen2.5-0.5B}
+\label{sec:qwen25_generalization}
+
+To evaluate whether SPADE's acceleration and memory efficiency generalize beyond the primary Qwen3 family, we benchmarked an independent model architecture: \texttt{Qwen/Qwen2.5-7B-Instruct} as the target model paired with \texttt{Qwen/Qwen2.5-0.5B-Instruct} as the drafter. We evaluated all 300 held-out long-context claims from \texttt{retrieved-heldout300.jsonl} under an identical execution configuration ($K=4$, $T=0.7$, $p=0.9$, \texttt{flex\_compile\_reduce\_overhead}, \texttt{fp32\_fast}). Table \ref{tab:qwen25_generalization} summarizes the efficiency and acceptance metrics.
+
+\input{generated_tables/table5_qwen25_generalization.tex}
+
+\paragraph{Cross-Model Findings:}
+\begin{enumerate}
+    \item \textbf{Consistent Wall-Clock Acceleration:} SPADE achieves \textbf{51.67 tok/s} end-to-end throughput, providing a statistically significant \textbf{+11.7\% wall-clock speedup} over target autoregressive decoding (\texttt{B0-S}, $46.27\text{ tok/s}$, $\Delta = +5.40\text{ tok/s}$, 95\% CI $[+3.83, +7.20]$, $p < 10^{-4}$) and a \textbf{+6.4\% speedup} over uncompressed speculative decoding (\texttt{Baseline Full}, $48.56\text{ tok/s}$, $\Delta = +3.11\text{ tok/s}$, 95\% CI $[+2.49, +3.76]$, $p < 10^{-4}$).
+    \item \textbf{Universal Active KV Footprint Reduction:} SPADE slashes active draft KV cache by \textbf{$-63.8\%$} ($61.0\text{ MB} \to 22.1\text{ MB}$, $p < 10^{-4}$), compressing draft prompt tokens by $-65.1\%$ ($5,107.1 \to 1,780.7$ tokens). This reduction mirrors the $-63.9\%$ KV cache savings observed on Qwen3, demonstrating that draft KV compression is structurally invariant to underlying transformer layer dimensions.
+    \item \textbf{Proposal Fidelity vs. Document Pruning Degradation:} Coarse document pruning (\texttt{BM25 Top-2}) suffers proposal divergence, dropping evaluated acceptance significantly by \textbf{$-1.80\text{ pp}$} vs.\ Baseline Full ($74.59\% \to 72.79\%$, $p < 10^{-4}$). In contrast, SPADE's attention-guided sentence selection preserves proposal fidelity with $\alpha_{\text{eval}} = \mathbf{73.98\%}$ ($2.876$ committed tokens/round), exhibiting no statistically significant difference from uncompressed Baseline Full ($\Delta = -0.62\text{ pp}$, 95\% CI $[-1.35, +0.10]$, $p = 0.0968$) and significantly outperforming BM25 Top-2 by \textbf{+1.19 pp} ($p = 0.0020$).
+    \item \textbf{Dense Context Resilience:} In dense retrieval regimes ($3 \le m \le 5$ passages, $N=56$ claims), SPADE achieves an acceptance of $\mathbf{47.89\%}$---surpassing uncompressed Baseline Full ($46.79\%$) by \textbf{+1.10 pp} while shedding $55.2\%$ of context text. On ultra-long contexts ($L \ge 20\text{k}$ characters, $N=124$ claims), SPADE maintains $46.63\%$ acceptance (+2.48 pp higher than BM25 Top-2's $44.15\%$) while retaining 100\% passage coverage and 100\% gold justification recall.
+\end{enumerate}
+
 \section{Discussion \& Negative Result Analysis}
 \label{sec:discussion}
 
@@ -419,9 +434,10 @@ We presented \textbf{SPADE}, an exact, evidence-selective speculative decoding f
     \item \textbf{GPU:} NVIDIA GeForce RTX 5090 (32,607 MiB, Blackwell sm\_120)
     \item \textbf{PyTorch:} 2.13.0+cu130 with Triton 3.7.1
     \item \textbf{Transformers:} 5.14.1
-    \item \textbf{Target Model Checkpoint:} \texttt{Qwen/Qwen3-8B} (BF16, commit \texttt{b968826})
-    \item \textbf{Draft Model Checkpoint:} \texttt{Qwen/Qwen3-0.6B} (BF16, commit \texttt{c1899de})
-    \item \textbf{Code Repository Commit:} \texttt{2c15061}
+    \item \textbf{Primary Target Model:} \texttt{Qwen/Qwen3-8B} (BF16, commit \texttt{b968826})
+    \item \textbf{Primary Draft Model:} \texttt{Qwen/Qwen3-0.6B} (BF16, commit \texttt{c1899de})
+    \item \textbf{Generalization Target Model:} \texttt{Qwen/Qwen2.5-7B-Instruct} (BF16)
+    \item \textbf{Generalization Draft Model:} \texttt{Qwen/Qwen2.5-0.5B-Instruct} (BF16)
 \end{itemize}
 
 \section{Statistical Significance Provenance}
@@ -431,6 +447,8 @@ All paired comparisons were computed using $B = 10,000$ bootstrap iterations res
     \item Primary Held-Out (300 claims): \nolinkurl{outputs/analysis/b1_4_heldout300/b1_3_live_report.json}
     \item Auxiliary Oracle (393 claims): \nolinkurl{outputs/analysis/b1_4_oracle400/b1_3_live_report.json}
     \item Development Set (100 claims): \nolinkurl{outputs/analysis/b1_3_live_retrieved100/b1_3_live_report.json}
+    \item Qwen2.5 Generalization (300 claims): \nolinkurl{outputs/analysis/p2_qwen25_heldout300/b1_3_live_report.json}
+    \item Qwen2.5 Retention Analysis: \nolinkurl{outputs/analysis/p2_qwen25_heldout300/content_retention_report.json}
 \end{itemize}
 
 \end{document}

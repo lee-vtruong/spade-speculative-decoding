@@ -1,0 +1,19 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccccccc}
+\toprule
+\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Active Draft KV} & \textbf{Peak GPU VRAM} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{Decode Thpt} & \textbf{E2E Thpt} & \textbf{E2E Latency} & \textbf{$\Delta$ vs. Full (95\% CI)} \\
+\midrule
+\textbf{B0-S (Target AR)} & Full (Target Only) & — & — & 17.52 GB & — & 1.000 & 56.61 & 46.27 & 21.61 & -2.29 [-3.81, -0.93]$^*$ \\
+\textbf{Baseline Full} & Full $\to$ Full & 5,107.1 & 61.0 MB & 18.78 GB & 74.59\% & 2.911 & 62.58 & 48.56 & 20.59 & — \\
+\textbf{BM25 Top-2} & Full $\to$ Top-2 & 2,245.4 & 27.5 MB & 18.54 GB & 72.79\% & 2.817 & 64.98 & 50.73 & 19.71 & +2.17 [+1.41, +2.97]$^*$ \\
+\textbf{BM25 Sent-B10k} & Full $\to$ Sent B=10k & 1,663.4 & 20.7 MB & 18.51 GB & 73.61\% & 2.861 & 67.47 & 52.07 & 19.21 & +3.51 [+2.84, +4.22]$^*$ \\
+\textbf{SPADE (Ours)} & Full $\to$ Attn B=10k & \textbf{1,780.7} & \textbf{22.1 MB} & \textbf{18.55 GB} & \textbf{73.98\%} & \textbf{2.876} & \textbf{66.61} & \textbf{51.67} & \textbf{19.35} & \textbf{+3.11 [+2.49, +3.76]$^*$} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Cross-Model Architecture Generalization on 300 Held-Out Long-Context Claims (Qwen2.5-7B Target + Qwen2.5-0.5B Draft, RTX 5090):} Throughput reported in tok/s; latency in ms/tok. Statistical significance tested via paired cluster bootstrap ($B=10,000$ iterations, * denotes $p < 0.001$). Sourced directly from benchmark JSON reports. SPADE achieves a $+11.7\%$ speedup over Target AR ($51.67$ vs.\ $46.27\text{ tok/s}$) and $+6.4\%$ over Baseline Full ($51.67$ vs.\ $48.56\text{ tok/s}$), while slashing active draft KV cache by $-63.8\%$ ($61.0\text{ MB} \to 22.1\text{ MB}$).}
+\label{tab:qwen25_generalization}
+\end{table*}

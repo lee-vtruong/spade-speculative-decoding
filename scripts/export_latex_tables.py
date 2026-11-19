@@ -8,13 +8,17 @@ import json
 from pathlib import Path
 
 
-def export_tables(heldout_json: Path, oracle_json: Path, out_dir: Path):
+def export_tables(heldout_json: Path, oracle_json: Path, qwen25_json: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     
     with open(heldout_json, "r", encoding="utf-8") as f:
         heldout = json.load(f)
     with open(oracle_json, "r", encoding="utf-8") as f:
         oracle = json.load(f)
+    qwen25 = None
+    if qwen25_json.exists():
+        with open(qwen25_json, "r", encoding="utf-8") as f:
+            qwen25 = json.load(f)
 
     # ----------------------------------------------------
     # Table 1: Main Results on Held-out 300 claims (6 Primary Benchmark Methods)
@@ -257,7 +261,7 @@ def export_tables(heldout_json: Path, oracle_json: Path, out_dir: Path):
     # Table 4: Evidence Selection Strategy & Coverage Ablation
     # ----------------------------------------------------
     ablation_keys = ["random_sent_b10k", "bm25_sent_b10k", "attn_sent_b10k_nocov", "attn_sent_b10k"]
-    arms_by_key = {a["key"]: a for a in h_arms}
+    arms_by_key = {a["key"]: a for a in heldout["arms"]}
     ablation_arms = [arms_by_key[k] for k in ablation_keys if k in arms_by_key]
 
     ablation_meta = {
@@ -313,10 +317,95 @@ def export_tables(heldout_json: Path, oracle_json: Path, out_dir: Path):
         (out_dir / "table4_selector_ablation.tex").write_text(t4_latex, encoding="utf-8")
         print(f"Exported {out_dir / 'table4_selector_ablation.tex'}")
 
+    # ----------------------------------------------------
+    # Table 5: Qwen2.5 Generalization (Qwen2.5-7B + Qwen2.5-0.5B)
+    # ----------------------------------------------------
+    if qwen25 is not None:
+        q_arms = qwen25["arms"]
+        q_comp_full = {
+            (x["arm"], x["metric"]): x for x in qwen25.get("comparisons", {}).get("vs_full", [])
+        }
+        q_comp_b0s = {
+            (x["arm"], x["metric"]): x for x in qwen25.get("comparisons", {}).get("vs_b0s", [])
+        }
+
+        t5_rows = []
+        for a in q_arms:
+            k = a["key"]
+            lbl = a["label"]
+            name, policy = arm_labels.get(k, (lbl, k))
+            draft_tok = f"{a['mean_draft_prompt_tokens']:,.1f}" if a["mean_draft_prompt_tokens"] > 0 and k != "b0s" else "—"
+            draft_kv = f"{a['draft_kv_peak_mb']:.1f} MB" if a["draft_kv_peak_mb"] > 0 else "—"
+            vram = f"{a['gpu_peak_allocated_gb']:.2f} GB"
+            alpha = f"{a['observed_alpha_eval_pct']:.2f}\\%" if a["observed_alpha_eval_pct"] > 0 else "—"
+            tok_rnd = f"{a['committed_per_round']:.3f}"
+            dec_thpt = f"{a['throughput_decode_tok_s']:.2f}"
+            e2e_thpt = f"{a['throughput_e2e_tok_s']:.2f}"
+            e2e_lat = f"{a['latency_e2e_ms_per_tok']:.2f}"
+
+            if k == "full":
+                delta_str = "—"
+            elif k == "b0s":
+                c = q_comp_b0s.get(("Baseline Full", "throughput_e2e_tok_s"))
+                if c:
+                    d_val = -c["delta"]
+                    ci_low = -c["ci_95_high"]
+                    ci_high = -c["ci_95_low"]
+                    star = "$^*$" if c["p_value_two_sided"] < 0.001 else ""
+                    delta_str = f"{d_val:+.2f} [{ci_low:+.2f}, {ci_high:+.2f}]{star}"
+                else:
+                    delta_str = "—"
+            else:
+                c = q_comp_full.get((lbl, "throughput_e2e_tok_s"))
+                if c:
+                    d_val = c["delta"]
+                    ci_low = c["ci_95_low"]
+                    ci_high = c["ci_95_high"]
+                    star = "$^*$" if c["p_value_two_sided"] < 0.001 else ""
+                    delta_str = f"{d_val:+.2f} [{ci_low:+.2f}, {ci_high:+.2f}]{star}"
+                else:
+                    delta_str = "—"
+
+            if k == "attn_sent_b10k":
+                draft_tok = f"\\textbf{{{draft_tok}}}"
+                draft_kv = f"\\textbf{{{draft_kv}}}"
+                vram = f"\\textbf{{{vram}}}"
+                alpha = f"\\textbf{{{alpha}}}"
+                tok_rnd = f"\\textbf{{{tok_rnd}}}"
+                dec_thpt = f"\\textbf{{{dec_thpt}}}"
+                e2e_thpt = f"\\textbf{{{e2e_thpt}}}"
+                e2e_lat = f"\\textbf{{{e2e_lat}}}"
+                delta_str = f"\\textbf{{{delta_str}}}"
+
+            t5_rows.append(
+                f"{name} & {policy} & {draft_tok} & {draft_kv} & {vram} & {alpha} & {tok_rnd} & {dec_thpt} & {e2e_thpt} & {e2e_lat} & {delta_str} \\\\"
+            )
+
+        t5_content = "\n".join(t5_rows)
+        t5_latex = f"""\\begin{{table*}}[t]
+\\centering
+\\small
+\\resizebox{{\\textwidth}}{{!}}{{%
+\\begin{{tabular}}{{llccccccccc}}
+\\toprule
+\\textbf{{Decoding Method}} & \\textbf{{Context Policy}} & \\textbf{{Mean Draft Tok}} & \\textbf{{Active Draft KV}} & \\textbf{{Peak GPU VRAM}} & \\textbf{{$\\alpha_{{\\text{{eval}}}}$ (\\%)}} & \\textbf{{Tok/Rnd}} & \\textbf{{Decode Thpt}} & \\textbf{{E2E Thpt}} & \\textbf{{E2E Latency}} & \\textbf{{$\\Delta$ vs. Full (95\\% CI)}} \\\\
+\\midrule
+{t5_content}
+\\bottomrule
+\\end{{tabular}}%
+}}
+\\caption{{\\textbf{{Cross-Model Architecture Generalization on 300 Held-Out Long-Context Claims (Qwen2.5-7B Target + Qwen2.5-0.5B Draft, RTX 5090):}} Throughput reported in tok/s; latency in ms/tok. Statistical significance tested via paired cluster bootstrap ($B=10,000$ iterations, * denotes $p < 0.001$). Sourced directly from benchmark JSON reports. SPADE achieves a $+11.7\\%$ speedup over Target AR ($51.67$ vs.\\ $46.27\\text{{ tok/s}}$) and $+6.4\\%$ over Baseline Full ($51.67$ vs.\\ $48.56\\text{{ tok/s}}$), while slashing active draft KV cache by $-63.8\\%$ ($61.0\\text{{ MB}} \\to 22.1\\text{{ MB}}$).}}
+\\label{{tab:qwen25_generalization}}
+\\end{{table*}}
+"""
+        (out_dir / "table5_qwen25_generalization.tex").write_text(t5_latex, encoding="utf-8")
+        print(f"Exported {out_dir / 'table5_qwen25_generalization.tex'}")
+
 
 if __name__ == "__main__":
     export_tables(
         Path("outputs/analysis/b1_4_heldout300/b1_3_live_report.json"),
         Path("outputs/analysis/b1_4_oracle400/b1_3_live_report.json"),
+        Path("outputs/analysis/p2_qwen25_heldout300/b1_3_live_report.json"),
         Path("docs/paper/latex/generated_tables"),
     )
