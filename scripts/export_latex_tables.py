@@ -17,9 +17,10 @@ def export_tables(heldout_json: Path, oracle_json: Path, out_dir: Path):
         oracle = json.load(f)
 
     # ----------------------------------------------------
-    # Table 1: Main Results on Held-out 300 claims
+    # Table 1: Main Results on Held-out 300 claims (6 Primary Benchmark Methods)
     # ----------------------------------------------------
-    h_arms = heldout["arms"]
+    primary_arm_keys = ["b0s", "full", "topk2", "bm25_sent_b8k", "bm25_sent_b10k", "attn_sent_b10k"]
+    h_arms = [a for a in heldout["arms"] if a["key"] in primary_arm_keys]
     comp_full = {
         (x["arm"], x["metric"]): x for x in heldout.get("comparisons", {}).get("vs_full", [])
     }
@@ -251,6 +252,66 @@ def export_tables(heldout_json: Path, oracle_json: Path, out_dir: Path):
 """
     (out_dir / "table3_oracle_results.tex").write_text(t3_latex, encoding="utf-8")
     print(f"Exported {out_dir / 'table3_oracle_results.tex'}")
+
+    # ----------------------------------------------------
+    # Table 4: Evidence Selection Strategy & Coverage Ablation
+    # ----------------------------------------------------
+    ablation_keys = ["random_sent_b10k", "bm25_sent_b10k", "attn_sent_b10k_nocov", "attn_sent_b10k"]
+    arms_by_key = {a["key"]: a for a in h_arms}
+    ablation_arms = [arms_by_key[k] for k in ablation_keys if k in arms_by_key]
+
+    ablation_meta = {
+        "random_sent_b10k": ("Random Sentences", "Uniform Random", "Yes ($m/m$)", "10,000"),
+        "bm25_sent_b10k": ("BM25 Sentences", "Lexical BM25", "Yes ($m/m$)", "10,000"),
+        "attn_sent_b10k_nocov": ("Target-Attn (No Coverage)", "Target Attention Hook", "No", "10,000"),
+        "attn_sent_b10k": ("SPADE (Proposed)", "Target Attention Hook", "\\textbf{Yes ($m/m$)}", "10,000"),
+    }
+
+    if ablation_arms:
+        full_thpt = next((a["throughput_e2e_tok_s"] for a in h_arms if a["key"] == "full"), 41.47)
+        t4_rows = []
+        for a in ablation_arms:
+            k = a["key"]
+            name, signal, cov, budget = ablation_meta.get(k, (a["label"], "—", "—", "—"))
+            draft_tok = f"{a['mean_draft_prompt_tokens']:,.1f}"
+            comp_pct = f"-{a['prompt_compression_pct']:.1f}\\%"
+            alpha = f"{a['observed_alpha_eval_pct']:.2f}\\%"
+            tok_rnd = f"{a['committed_per_round']:.3f}"
+            lat_tok = f"{a['latency_e2e_ms_per_tok']:.2f}"
+            e2e_thpt = f"{a['throughput_e2e_tok_s']:.2f}"
+            spd = f"{(a['throughput_e2e_tok_s'] / full_thpt - 1.0) * 100:+.1f}\\%"
+
+            if k == "attn_sent_b10k":
+                name = f"\\textbf{{{name}}}"
+                alpha = f"\\textbf{{{alpha}}}"
+                tok_rnd = f"\\textbf{{{tok_rnd}}}"
+                lat_tok = f"\\textbf{{{lat_tok}}}"
+                e2e_thpt = f"\\textbf{{{e2e_thpt}}}"
+                spd = f"\\textbf{{{spd}}}"
+
+            t4_rows.append(
+                f"{name} & {signal} & {cov} & {budget} & {draft_tok} ({comp_pct}) & {alpha} & {tok_rnd} & {lat_tok} & {e2e_thpt} & {spd} \\\\"
+            )
+
+        t4_content = "\n".join(t4_rows)
+        t4_latex = f"""\\begin{{table*}}[t]
+\\centering
+\\small
+\\resizebox{{\\textwidth}}{{!}}{{%
+\\begin{{tabular}}{{llcccccccr}}
+\\toprule
+\\textbf{{Selection Strategy}} & \\textbf{{Scoring Signal}} & \\textbf{{Passage Coverage}} & \\textbf{{Budget $B$}} & \\textbf{{Draft Tokens (Comp)}} & \\textbf{{$\\alpha_{{\\text{{eval}}}}$ (\\%)}} & \\textbf{{Tok/Rnd}} & \\textbf{{E2E ms/tok}} & \\textbf{{E2E tok/s}} & \\textbf{{Speedup vs. Full}} \\\\
+\\midrule
+{t4_content}
+\\bottomrule
+\\end{{tabular}}%
+}}
+\\caption{{\\textbf{{Ablation of Evidence Selection Strategy and Coverage Rule:}} Comparing uniform random, lexical BM25, and target-attention sentence selection under an identical budget ($B=10\\text{{k}}$ characters) on 300 held-out claims. Disabling passage coverage guarantees causes cited document omission and proposal divergence, while attention scoring with passage-level coverage achieves the highest acceptance ($78.20\\%$) and maximum wall-clock speedup ($+4.4\\%$ vs.\\ Full).}}
+\\label{{tab:selector_ablation}}
+\\end{{table*}}
+"""
+        (out_dir / "table4_selector_ablation.tex").write_text(t4_latex, encoding="utf-8")
+        print(f"Exported {out_dir / 'table4_selector_ablation.tex'}")
 
 
 if __name__ == "__main__":

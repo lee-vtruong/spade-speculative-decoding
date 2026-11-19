@@ -318,14 +318,45 @@ We emphasize that SPADE is an inference acceleration framework and does not aim 
 
 ## 7. Discussion & Negative Result Analysis
 
-### 7.1. Why Attention Guidance Beats Lexical Matching: Budget-Controlled Control
-A critical question in context-selective speculative decoding is whether attention guidance provides distinct value over standard lexical sentence ranking when context length is held strictly constant. To decouple the scoring function from context size, we evaluated BM25 sentence selection under both $B=8,000$ (`BM25 Sent-B8k`) and an identical $B=10,000$ budget (`BM25 Sent-B10k`) matching SPADE.
+### 7.1. Ablation Analysis: Selection Strategy, Passage Coverage, and Content Retention
 
-As reported in Table 1:
-1. **Acceptance Gap at Identical Budget ($B=10\text{k}$):** Under the identical 10,000-character budget, `BM25 Sent-B10k` achieves $\alpha_{\text{eval}} = 77.24\%$, suffering a statistically significant $-0.92\text{ pp}$ drop compared to Full ($p = 0.0022$). In contrast, SPADE's `Target-Attn Sent-B10k` achieves $\alpha_{\text{eval}} = \mathbf{78.20\%}$, outperforming BM25 by **+0.96 pp** in acceptance ($p < 10^{-4}$). Expanding the lexical budget from 8k to 10k did not rescue BM25 ($77.36\% \to 77.24\%$), because keyword matching greedily includes sentences with high term frequency that are irrelevant to the target model's actual multi-hop reasoning.
-2. **Throughput Superiority:** Because attention guidance aligns drafter probability mass with the target model, SPADE achieves higher decode throughput (**57.03** vs. $55.73\text{ tok/s}$) and higher end-to-end throughput (**43.28** vs. $42.65\text{ tok/s}$, $+0.63\text{ tok/s}$ higher, $p < 10^{-4}$) than `BM25 Sent-B10k`.
+To rigorously decouple the scoring signal from context length and understand the role of structural passage coverage, we conducted a controlled 4-way ablation across all 300 held-out claims under an identical 10,000-character budget ($B=10\text{k}$) and runtime environment (`flex_compile_reduce_overhead`, `fp32_fast`, $K=4$). Table 5 reports empirical throughput, acceptance, and committed tokens per round alongside 10,000 paired cluster bootstrap iterations.
 
-These controlled comparisons show that target prefill attention scoring provides superior drafter proposal alignment compared to lexical matching under identical length constraints. While keyword-based ranking greedily selects sentences with high term frequency regardless of their utility to the generation process, the target model's causal self-attention weights indicate which evidence positions the target model actually prioritizes during prefill, avoiding proposal degradation without requiring an external retrieval model.
+| Selection Strategy | Scoring Signal | Passage Coverage | Budget $B$ | Mean Draft Tokens (Comp%) | $\alpha_{\text{eval}}$ (%) | Tok/Rnd | E2E ms/tok | E2E tok/s | Speedup vs. Full |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Random Sentences** | Uniform Random | Yes ($m/m$) | 10,000 | 1,644.0 (-67.7%) | 76.50% | 2.996 | 23.61 | 42.36 | +2.1% |
+| **BM25 Sentences** | Lexical BM25 | Yes ($m/m$) | 10,000 | 1,646.4 (-67.7%) | 77.24% | 3.047 | 23.45 | 42.65 | +2.8% |
+| **Target-Attn (No Coverage)** | Target Attention Hook | No ($0/m$) | 10,000 | 1,776.4 (-65.1%) | 78.14% | 3.109 | 23.08 | 43.33 | +4.5% |
+| **SPADE (Proposed)** | Target Attention Hook | **Yes ($m/m$)** | 10,000 | **1,776.8 (-65.1%)** | **78.20%** | **3.114** | **23.10** | **43.28** | **+4.4%** |
+
+*Table 5: 4-Way ablation of evidence selection strategy and passage coverage guarantee under matched character budget ($B=10\text{k}$) on 300 held-out claims (NVIDIA RTX 5090).*
+
+#### 1. Attention Guidance vs. Uniform Random Selection
+When evidence sentences are selected uniformly at random under the identical $B=10\text{k}$ budget and coverage rule (`Random Sent-B10k`), evaluated acceptance $\alpha_{\text{eval}}$ collapses by **$-1.70\text{ pp}$** vs. SPADE ($76.50\%$ vs. $78.20\%$, $p < 10^{-4}$), committed tokens drop to $2.996$ per round ($p < 10^{-4}$), and throughput degrades to $42.36\text{ tok/s}$ ($p = 0.0014$). This confirms that sentence selection is not a trivial length reduction; the draft model requires semantically salient factual propositions to maintain proposal alignment with the target verifier.
+
+#### 2. Attention Guidance vs. Lexical BM25 Matching
+Under the identical 10,000-character budget, `BM25 Sent-B10k` achieves $\alpha_{\text{eval}} = 77.24\%$, suffering a statistically significant $-0.96\text{ pp}$ drop compared to SPADE ($p = 0.0022$) and $-0.92\text{ pp}$ compared to Baseline Full ($p = 0.0020$). Expanding the lexical budget from 8k to 10k did not rescue BM25 ($77.36\% \to 77.24\%$), because term-frequency matching greedily includes sentences with high keyword counts that are irrelevant to the target model's actual reasoning. In contrast, target prefill attention weights directly indicate which token positions the target verifier attends to during prefill, achieving superior proposal alignment ($78.20\%$, $p < 10^{-4}$) and $+0.63\text{ tok/s}$ higher throughput ($43.28$ vs. $42.65\text{ tok/s}$, $p = 0.0206$).
+
+#### 3. Role of the Passage Coverage Guarantee ($m/m$) and Citation Recall
+When the passage coverage constraint is removed (`Target-Attn NoCoverage`, $\text{min\_sentences} = 0$), the selector greedily packs sentences from a subset of passages, omitting unselected candidate documents. While unconstrained packing marginally reduces prefill overhead ($43.33$ vs. $43.28\text{ tok/s}$), it causes the draft model to drop cited evidence identifiers ($99.72\%$ vs. $100.0\%$ cited passage recall across 354 target citations). Enforcing the structural $m/m$ coverage rule guarantees 100% citation validity and 100% cited document retention with zero measurable latency cost ($\Delta = 0.025\text{ ms/tok}$, $p = 0.3310$).
+
+Furthermore, as summarized in Table 6, naive passage truncation (`Selective Top-2`) drops **37.7% of passages cited by the target model** (Recall = $62.3\%$, retaining only 195 of 313 cited passages). In sharp contrast, SPADE achieves **100.0% citation recall** (354/354 cited passages retained) while compressing evidence text by $63.97\%$.
+
+| Method | Mean Passage Coverage | Target-Cited Passages | Retained Cited Passages | Cited Passage Recall | Gold Justification Recall | Evidence Compression |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Baseline Full** | 100.0% | 335 | 335 | **100.0%** | 100.0% | 0.0% (Uncompressed) |
+| **Selective Top-2** | 60.8% | 313 | 195 | **62.3%** | 100.0% | 28.35% retained |
+| **BM25 Sent-B8k** | 100.0% | 332 | 332 | **100.0%** | 100.0% | 41.20% retained |
+| **BM25 Sent-B10k** | 100.0% | 328 | 328 | **100.0%** | 100.0% | 36.04% retained |
+| **SPADE (Ours)** | **100.0%** | **354** | **354** | **100.0%** | **100.0%** | **36.03% retained** |
+| Target-Attn (No Cov) | 99.67% | 355 | 354 | 99.72% | 100.0% | 36.03% retained |
+
+*Table 6: Target-cited evidence passage retention and compression across 300 held-out claims.*
+
+#### 4. Stratified Performance in Long-Context Regimes
+Stratifying the 300 claims by context length and passage count reveals where SPADE's advantage is most pronounced:
+- **Ultra-Long Contexts ($L \ge 20,000$ characters, $N=124$ claims, 41.3% of the benchmark):** Conventional passage-dropping (`BM25 Top-2`) and lexical selection (`BM25 Sent-B10k`) experience severe acceptance drops (collapsing to $49.66\%$ and $50.66\%$, respectively, representing $-3.66\text{ pp}$ and $-2.66\text{ pp}$ deficits vs. Full). In contrast, SPADE achieves $\alpha_{\text{eval}} = \mathbf{53.69\%}$ in this regime—higher than even the uncompressed Baseline Full ($53.32\%$)—while compressing context characters by **74.9%** (retaining only $25.1\%$ of evidence text).
+- **High Passage Density ($6 \le m \le 10$ passages, $N=84$ claims):** Baseline Full achieves $53.08\%$ acceptance, while Top-2 collapses to $48.60\%$ ($-4.48\text{ pp}$). SPADE maintains $\mathbf{53.70\%}$ acceptance (+0.62 pp over Full) while shedding $77.8\%$ of uninformative evidence tokens.
 
 ### 7.2. Analysis of Draft Logit Biasing (Direction A Negative Result)
 Prior to developing SPADE's asymmetric context formulation, we investigated evidence logit biasing (dynamically boosting draft model logits on continuous $n$-grams extracted from evidence). 

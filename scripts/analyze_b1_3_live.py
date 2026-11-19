@@ -381,7 +381,9 @@ def main() -> None:
         ("compact", "Compact (1s/200c)", f"{args.run_prefix}-compact"),
         ("bm25_sent_b8k", "BM25 Sent-B8k", f"{args.run_prefix}-bm25-sent-b8k"),
         ("bm25_sent_b10k", "BM25 Sent-B10k", f"{args.run_prefix}-bm25-sent-b10k"),
-        ("attn_sent_b10k", "Target-Attn Sent-B10k", f"{args.run_prefix}-attn-sent-b10k"),
+        ("random_sent_b10k", "Random Sent-B10k", f"{args.run_prefix}-random-sent-b10k"),
+        ("attn_sent_b10k_nocov", "SPADE NoCoverage", f"{args.run_prefix}-attn-sent-b10k-nocoverage"),
+        ("attn_sent_b10k", "SPADE (Attn Sent-B10k)", f"{args.run_prefix}-attn-sent-b10k"),
     ]
 
     arms: list[dict[str, Any]] = []
@@ -410,7 +412,7 @@ def main() -> None:
         "throughput_decode_tok_s",
     ]
 
-    comparisons: dict[str, list[dict[str, Any]]] = {"vs_full": [], "vs_topk2": [], "vs_b0s": []}
+    comparisons: dict[str, list[dict[str, Any]]] = {"vs_full": [], "vs_topk2": [], "vs_b0s": [], "vs_spade": []}
     if "full" in cmaps:
         for a in arms:
             if a["key"] in {"b0s", "full"}:
@@ -418,6 +420,14 @@ def main() -> None:
             for m in metrics_full:
                 res = _paired_bootstrap(cmaps["full"], cmaps[a["key"]], m, n_bootstrap=args.n_bootstrap, seed=args.seed)
                 comparisons["vs_full"].append({"arm": a["label"], **res})
+
+    if "attn_sent_b10k" in cmaps:
+        for a in arms:
+            if a["key"] in {"b0s", "attn_sent_b10k"}:
+                continue
+            for m in ["throughput_e2e_tok_s", "latency_e2e_ms_per_tok", "observed_alpha_eval_pct", "committed_per_round"]:
+                res = _paired_bootstrap(cmaps["attn_sent_b10k"], cmaps[a["key"]], m, n_bootstrap=args.n_bootstrap, seed=args.seed)
+                comparisons["vs_spade"].append({"arm": a["label"], **res})
 
     if "topk2" in cmaps:
         for a in arms:
