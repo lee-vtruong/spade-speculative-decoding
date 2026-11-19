@@ -380,6 +380,7 @@ def main() -> None:
         ("topk2", "BM25 Top-2", f"{args.run_prefix}-selective-topk2"),
         ("compact", "Compact (1s/200c)", f"{args.run_prefix}-compact"),
         ("bm25_sent_b8k", "BM25 Sent-B8k", f"{args.run_prefix}-bm25-sent-b8k"),
+        ("bm25_sent_b10k", "BM25 Sent-B10k", f"{args.run_prefix}-bm25-sent-b10k"),
         ("attn_sent_b10k", "Target-Attn Sent-B10k", f"{args.run_prefix}-attn-sent-b10k"),
     ]
 
