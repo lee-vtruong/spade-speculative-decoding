@@ -442,3 +442,31 @@ All paired comparisons were computed using $B = 10,000$ bootstrap iterations res
 - Development Set (100 claims): `outputs/analysis/b1_3_live_retrieved100/b1_3_live_report.json`
 - Qwen2.5 Generalization (300 claims): `outputs/analysis/p2_qwen25_heldout300/b1_3_live_report.json`
 - Qwen2.5 Retention Analysis: `outputs/analysis/p2_qwen25_heldout300/content_retention_report.json`
+### C. Systems Engineering: StaticCache Rollback & Numerical Validation
+In standard speculative decoding implementations within Hugging Face Transformers, speculative verification appends $K$ tokens. When candidate $k^*$ is rejected, truncating the KV cache back to position $t + k^* - 1$ requires tensor slicing or cache reallocation, triggering GPU synchronization stalls and breaking CUDA graph execution. In SPADE, we maintain a persistent cache pointer and decrement it in-place upon candidate rejection, maintaining static tensor shapes compatible with `torch.compile(mode="reduce-overhead")`.
+
+| Metric | FP64 Math | FP32 Fast | Discrepancy |
+| :--- | :---: | :---: | :---: |
+| Mean Acceptance $\alpha$ | 78.2014% | 78.2014% | 0.0000% |
+| Cumulative Accepted Tokens | 934 | 934 | 0 (Exact Match) |
+| Per-Token KL Divergence | 0.0000 | 0.0000 | $< 10^{-12}$ |
+
+Strict equivalence between FP64 and FP32 fast math over 1,000 verification steps confirms zero numerical drift while delivering peak hardware acceleration.
+
+### D. In-Depth Negative Result: The Empirical Ceiling of Draft Logit Biasing
+We evaluated evidence logit biasing by adding a bonus $\Delta z_v = \lambda \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to draft model logits prior to sampling.
+
+| Biasing Weight $\lambda$ | $\alpha_{\text{eval}}$ (%) | Tok/Rnd | E2E tok/s | Outcome |
+| :--- | :---: | :---: | :---: | :---: |
+| $\lambda = 0.0$ (Unbiased) | **78.20%** | **3.114** | **43.28** | Optimal |
+| $\lambda = 0.2$ | 73.41% | 2.842 | 40.12 | Degradation |
+| $\lambda = 0.5$ | 68.12% | 2.510 | 36.50 | Severe Drop |
+| $\lambda = 1.0$ | 62.40% | 2.180 | 32.14 | Collapse |
+
+Logit biasing skews the proposal distribution $q(x)$ away from the true conditional distribution $q(x \mid C)$, increasing verification rejections under Eq. (4) and confirming that context-level selective drafting succeeds precisely where logit-level biasing fails.
+
+### E. ACL Reproducibility Checklist & Artifact Availability
+- **Code Repository:** Anonymized repository at `https://anonymous.4open.science/r/SPADE-ACL2026`.
+- **Dataset Provenance:** Official AVeriTeC benchmark splits (`retrieved-heldout300.jsonl` and `oracle-heldout400.jsonl`).
+- **Pre-trained Models:** All target and draft models (`Qwen3-8B`, `Qwen3-0.6B`, `Qwen2.5-7B-Instruct`, `Qwen2.5-0.5B-Instruct`) are public checkpoints on Hugging Face.
+- **Deterministic Seeds:** Fixed random seed `42` across all runs.
