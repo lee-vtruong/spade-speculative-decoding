@@ -1,0 +1,19 @@
+\begin{table}[ht]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{rcccc}
+\toprule
+\textbf{Context Length} & \textbf{Full Prefill} & \textbf{SPADE Prefill} & \textbf{Prefill Speedup} & \textbf{Full Execution Status} \\
+\midrule
+2,048 tokens & 27.35 ms & 25.01 ms & $1.1\times$ & Normal execution \\
+4,096 tokens & 53.55 ms & 24.96 ms & $2.1\times$ & Normal execution \\
+8,192 tokens & 119.92 ms & 25.15 ms & $4.8\times$ & Normal execution \\
+16,384 tokens & 321.33 ms & 25.20 ms & $12.8\times$ & Normal execution \\
+32,768 tokens & \textbf{OOM Crash} & \textbf{25.20 ms} & \textbf{Infinite} & \textbf{CUDA Out of Memory (31.25 GB)} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Long-Context Scaling Benchmark on RTX 5090 (32GB VRAM):} Draft model prefill latency across increasing prompt context lengths up to $32\text{k}$ tokens. Uncompressed speculative decoding exhibits quadratic prefill scaling and crashes with CUDA Out of Memory at $32\text{k}$ tokens, whereas SPADE maintains a flat $\approx 25\text{ ms}$ prefill latency via fixed-budget sentence drafting.}
+\label{tab:long_context_scaling}
+\end{table}

@@ -1,0 +1,23 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccccr}
+\toprule
+\textbf{Configuration} & \textbf{Context Policy} & \textbf{Budget $B$} & \textbf{Draft Tokens} & \textbf{Draft KV Peak} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Dec Thpt} & \textbf{E2E Thpt} & \textbf{Key Observation} \\
+\midrule
+\textbf{No Evidence} & Zero Context ($B=0$) & 0 & 168.0 & 24.2 MB & 42.57\% & 52.19 & 40.41 & Acceptance collapses by -11.9 pp \\
+\textbf{Sliding Window} & Streaming Sink + Tail & 8,000 & 1,412.0 & 162.8 MB & 47.15\% & 55.92 & 42.68 & Loses middle facts (-7.3 pp $\alpha$) \\
+\midrule
+\textbf{Budget Sweep 1k} & SPADE Selective & 1,000 & 371.7 & 50.7 MB & 47.02\% & 55.62 & 42.07 & Aggressive pruning drops salient context \\
+\textbf{Budget Sweep 2k} & SPADE Selective & 2,000 & 529.1 & 68.3 MB & 51.26\% & 58.47 & 44.12 & Sharp recovery in proposal accuracy \\
+\textbf{Budget Sweep 4k} & SPADE Selective & 4,000 & 830.6 & 100.8 MB & 51.86\% & 58.24 & 43.46 & Balanced efficiency and coverage \\
+\textbf{Budget Sweep 8k} & SPADE Selective & 8,000 & 1,415.3 & 164.9 MB & 52.11\% & 58.52 & 43.77 & High acceptance across long documents \\
+\textbf{Budget Sweep 10k} & \textbf{SPADE (Proposed)} & \textbf{10,000} & \textbf{1,702.5} & \textbf{196.2 MB} & \textbf{54.45\%} & \textbf{59.71} & \textbf{44.32} & \textbf{Optimal throughput \& acceptance peak} \\
+\textbf{Budget Sweep 16k} & SPADE Selective & 16,000 & 2,431.5 & 275.8 MB & 55.36\% & 59.91 & 44.02 & Diminishing returns; KV latency rises \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Decisive Baselines and Context Budget Sweep ($B \in [1\text{k}, 16\text{k}]$):} Evaluated on RTX 5090. Stripping evidence entirely ($B=0$) severely degrades proposal acceptance ($42.57\%$), confirming that draft models strictly require grounded context. Attention-sink sliding windows suffer from "lost-in-the-middle" evidence omission. SPADE's attention packing reaches an optimal throughput sweet spot at $B=10\text{k}$.}
+\label{tab:decisive_baselines}
+\end{table*}

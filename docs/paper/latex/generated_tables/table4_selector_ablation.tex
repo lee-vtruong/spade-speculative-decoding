@@ -13,6 +13,6 @@ Target-Attn (No Coverage) & Target Attention Hook & No & 10,000 & 1,776.4 (-65.1
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Ablation of Evidence Selection Strategy and Coverage Rule:} Comparing uniform random, lexical BM25, and target-attention sentence selection under an identical budget ($B=10\text{k}$ characters) on 300 held-out claims. Disabling passage coverage causes cited document omission and proposal divergence, while attention scoring with passage-level coverage achieves the highest acceptance ($78.20\%$) with wall-clock throughput essentially matching unconstrained attention selection ($43.28$ vs.\ $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$), while guaranteeing 100\% passage coverage and eliminating omitted evidence citations.}
+\caption{\textbf{Ablation of Evidence Selection Strategy and Coverage Rule:} Comparing uniform random, lexical BM25, and target-attention sentence selection under an identical budget ($B=10\text{k}$ characters) on 300 held-out claims. Disabling passage coverage omits cited evidence passages with a minor acceptance variation (+0.06 pp), while attention scoring with passage-level coverage achieves the highest acceptance ($78.20\%$) with wall-clock throughput matching unconstrained attention selection within hardware noise ($43.28$ vs.\ $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$), while guaranteeing 100\% passage coverage and eliminating omitted evidence citations.}
 \label{tab:selector_ablation}
 \end{table*}

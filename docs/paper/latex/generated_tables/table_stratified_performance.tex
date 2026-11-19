@@ -1,0 +1,19 @@
+\begin{table}[t]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Context Regime} & \textbf{Claims} & \textbf{Full Thpt} & \textbf{SPADE Thpt} & \textbf{Speedup} & \textbf{Draft KV Red.} & \textbf{$\alpha$ (Full / SPADE)} \\
+\midrule
+Bypass ($L \le 10\text{k}$) & 127 (42.3\%) & 71.52 & 71.71 & +0.3\% & 0.0\% & 57.86\% / 57.81\% \\
+Selective ($L > 10\text{k}$) & 173 (57.7\%) & 39.59 & 41.16 & \textbf{+4.0\%} & \textbf{-69.4\%} & 52.38\% / 52.66\% \\
+Dense ($L \ge 20\text{k}$) & 124 (41.3\%) & 33.16 & 34.91 & \textbf{+5.3\%} & \textbf{-74.4\%} & 51.93\% / 52.19\% \\
+\midrule
+\textbf{Full Test Set} & 300 (100\%) & 53.11 & 54.09 & +1.9\% & -65.1\% & 54.04\% / 54.21\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Context-Stratified Efficiency Breakdown on Held-Out Test Set (Qwen3):} Throughput in tok/s. On short claims ($L \le 10\text{k}$ chars), the minimal-overhead bypass matches Baseline Full within noise floor (+0.3\%). Acceleration concentrates on long-context regimes, scaling to $+5.3\%$ speedup and $-74.4\%$ KV cache reduction on dense multi-document claims ($L \ge 20\text{k}$).}
+\label{tab:stratified_performance}
+\end{table}
