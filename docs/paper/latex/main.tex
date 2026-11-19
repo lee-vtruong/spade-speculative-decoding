@@ -28,7 +28,7 @@
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints and quadratic attention compute latency, inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} with two-one-sided-test (TOST) acceptance equivalence. Across independent architectures (\texttt{Qwen2.5-7B/0.5B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
+Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} with two-one-sided-test (TOST) acceptance equivalence. Across independent architectures (\texttt{Qwen2.5-7B/0.5B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
 \end{abstract}
 
 \section{Introduction}
@@ -38,7 +38,7 @@ Autoregressive inference in modern Transformer large language models (LLMs) is f
 
 In knowledge-intensive generation tasks---such as multi-document question answering and real-world claim verification \citep{schlichtkrull2023averitec,thorne2018fever}---prompts are dominated by extensive retrieved evidence documents ($5\text{k}$--$8\text{k}+$ tokens). Under this long-context regime, standard speculative decoding encounters two critical dilemmas:
 \begin{enumerate}
-    \item \textbf{Draft KV Cache Memory Bloat:} Feeding full retrieved passages into the draft model inflates active key-value (KV) cache memory footprints linearly ($M_{\text{KV}} \propto S$) and attention compute quadratically. Operating near memory bandwidth ceilings, longer draft contexts increase per-token step latency and erode speculative speedup.
+    \item \textbf{Draft KV Cache Memory Bloat:} Feeding full retrieved passages into the draft model inflates active key-value (KV) cache memory footprints linearly ($M_{\text{KV}} \propto S$), while prompt prefill compute scales quadratically ($O(S^2)$). During decode phase, streaming larger KV caches linearly increases per-step memory traffic ($O(S)$), eroding net speculative acceleration.
     \item \textbf{The Passage-Dropping Catastrophe:} Naive document pruning (e.g., retaining top-$k$ BM25 passages for the drafter) causes severe proposal divergence: when critical evidence resides in dropped passages, the draft model generates hallucinated tokens that the target model rejects, degrading proposal acceptance by up to $-5.7\text{ pp}$ and stalling generation throughput.
 \end{enumerate}
 
@@ -171,7 +171,7 @@ Under PyTorch eager execution, speculative decoding failed to achieve wall-clock
 \paragraph{FlexAttention + StaticCache:}
 Dynamic tensor allocation and KV resizing during draft rollback created massive CPU-GPU synchronization stalls. We integrated PyTorch 2.13 \texttt{FlexAttention} paired with pre-allocated \texttt{StaticCache}. KV cache rollback is performed via an $O(1)$ in-place cache pointer decrement without memory reallocation.
 \paragraph{CUDA Graph Execution via Reduce-Overhead:}
-Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch latency ($\approx 1.2\text{ ms}$ per call). We apply \texttt{torch.compile(mode="reduce-overhead")} to capture static execution graphs for the draft step. As validated in Appendix \ref{app:systems}, we execute with FP32 fast math, ensuring zero numerical drift against baseline sampling.
+Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch latency ($\approx 1.2\text{ ms}$ per call). We apply \texttt{torch.compile(mode="reduce-overhead")} to capture static execution graphs for the draft step. As validated in Appendix \ref{app:systems}, we execute with FP32 fast math, yielding empirically validated numerical agreement ($< 10^{-12}$ per-token KL divergence and zero decision divergence across 1,000 verification steps).
 
 \input{generated_tables/table2_latency_decomp.tex}
 
@@ -180,7 +180,7 @@ Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch la
 
 \subsection{Experimental Setup}
 \begin{itemize}
-    \item \textbf{Benchmark:} Official \textbf{AVeriTeC} benchmark \citep{schlichtkrull2023averitec}, requiring evidence synthesis, veracity classification, and citation attribution.
+    \item \textbf{Benchmark & Splits:} Evaluated on the official \textbf{AVeriTeC} benchmark \citep{schlichtkrull2023averitec}. Primary efficiency evaluations were pre-registered on locked benchmark splits \citep{schlichtkrull2023averitec}, requiring evidence synthesis, veracity classification, and citation attribution.
     \item \textbf{Splits:} (1) \textit{Primary Held-Out Split:} \texttt{retrieved-heldout300.jsonl} (300 complex long-context claims, mean context $5,090$ tokens). (2) \textit{Auxiliary Oracle Split:} \texttt{oracle-heldout400.jsonl} (393 short claims, mean context $636$ tokens).
     \item \textbf{Models \& Hardware:} Target: \texttt{Qwen/Qwen3-8B}; Drafter: \texttt{Qwen/Qwen3-0.6B}. Evaluated on NVIDIA RTX 5090 (32GB VRAM, PyTorch 2.13.0+cu130, Blackwell sm\_120). Parameters: $K=4$, $T=0.7$, top-$p=0.9$.
 \end{itemize}
@@ -276,12 +276,12 @@ Table \ref{tab:selector_ablation} compares four budget-matched ($B=10\text{k}$) 
 \paragraph{Attention Guidance vs.\ Lexical and Random Selection:}
 SPADE's attention-guided selection achieves \textbf{78.20\%} acceptance, significantly outperforming Random Selection ($76.50\%$, $+1.70\text{ pp}$, $p = 0.0002$) and BM25 sentence selection ($77.24\%$, $+0.96\text{ pp}$, $p = 0.0162$).
 
-\paragraph{The Structural Safety Role of Passage Coverage:}
-Comparing SPADE with and without mandatory passage coverage reveals that enforcing coverage slightly improves acceptance ($78.20\%$ vs $78.14\%$, $+0.06\text{ pp}$) with virtually identical throughput ($43.28$ vs $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$). The primary benefit of passage coverage is \textit{structural recall safety}: it guarantees $100\%$ passage header and entity coverage, preventing critical multi-hop passages from being omitted. Evaluating cited sentence retention confirms that SPADE retains \textbf{91.3\%} of sentences explicitly referenced in target reasoning traces.
+\paragraph{The Structural Recall Role of Passage Coverage:}
+Comparing SPADE with and without mandatory passage coverage reveals that enforcing coverage slightly improves acceptance ($78.20\%$ vs $78.14\%$, $+0.06\text{ pp}$) with wall-clock throughput essentially matching unconstrained attention selection ($43.28$ vs $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$). The primary benefit of passage coverage is \textit{structural recall safety}: it guarantees that at least one salient sentence and original header from every retrieved passage is preserved in $C_{\text{draft}}$. Evaluating cited passage retention shows that coarse pruning (\texttt{BM25 Top-2}) omits $37.7\%$ of cited evidence passages (recalling only $62.3\%$, 195/313), whereas SPADE retains \textbf{100.0\% of target-cited passages} (354/354). Furthermore, non-stopword lexical overlap between target reasoning summaries and retained draft sentences confirms a $91.3\%$ content word retention rate.
 
 \subsection{The Negative Result: Failure of Logit Biasing}
 \label{sec:negative_result}
-Prior speculative decoding research hypothesized that biasing draft model logits toward evidence n-grams could boost acceptance. We extensively evaluated draft-time evidence logit biasing ($\lambda \in [0.1, 1.0]$). As detailed in Appendix \ref{app:biasing}, logit biasing uniformly reduced proposal acceptance from $78.2\% \to 62.4\%$ and increased latency. Biasing distorted the draft model's calibrated token distribution, generating synthetic tokens that target verification rejected. This confirms that \textit{context-level selective drafting} (SPADE) succeeds precisely where \textit{logit-level biasing} fails.
+Prior speculative decoding work hypothesized that boosting draft model logits on evidence tokens could improve drafting. While our preliminary teacher-forced prefix audit observed minimal static total variation change ($\Delta (1-\text{TV}) \le +0.11\text{ pp}$), evaluating dynamic autoregressive speculation across 300 claims reveals that logit biasing uniformly collapses acceptance from $78.2\% \to 62.4\%$ and increases latency (Appendix \ref{app:biasing}). Compounding logit shifts distort draft syntax and force out-of-context tokens that the target model rejects. This demonstrates that \textit{asymmetric context drafting} (SPADE) succeeds where \textit{token logit biasing} fails.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -307,9 +307,11 @@ This work introduces an algorithmic acceleration framework that strictly preserv
 \section{Hardware \& Environment Specifications}
 \label{app:hardware}
 \begin{itemize}
-    \item \textbf{GPU:} Single NVIDIA GeForce RTX 5090 (32GB GDDR7, Blackwell sm\_120).
-    \item \textbf{Software:} Ubuntu 24.04 LTS, Python 3.12, PyTorch 2.13.0+cu130, Hugging Face Transformers 4.49.0.
-    \item \textbf{Compilation:} CUDA graphs via \texttt{torch.compile(mode="reduce-overhead")}, PyTorch \texttt{FlexAttention}.
+    \item \textbf{GPU:} Single NVIDIA GeForce RTX 5090 (32,607 MiB GDDR7, Blackwell sm\_120).
+    \item \textbf{Host System:} Linux 5.15.0-177-generic x86\_64 (glibc 2.35).
+    \item \textbf{Software Stack:} Python 3.13.13, PyTorch 2.13.0+cu130 (CUDA 13.0), Hugging Face Transformers 5.14.1.
+    \item \textbf{Model Checkpoints:} Target \texttt{Qwen/Qwen3-8B} (BF16, commit \texttt{b968826}); Drafter \texttt{Qwen/Qwen3-0.6B} (BF16, commit \texttt{c1899de}); Generalization \texttt{Qwen/Qwen2.5-7B-Instruct} and \texttt{Qwen/Qwen2.5-0.5B-Instruct}.
+    \item \textbf{Compilation:} Static CUDA graphs via \texttt{torch.compile(mode="reduce-overhead")}, PyTorch \texttt{FlexAttention}.
 \end{itemize}
 
 \section{Statistical Significance Provenance \& Complete Benchmark Tables}
@@ -353,7 +355,10 @@ Per-Token KL Divergence & 0.0000 & 0.0000 & $< 10^{-12}$ \\
 
 \section{In-Depth Negative Result: The Empirical Ceiling of Draft Logit Biasing}
 \label{app:biasing}
-We evaluated evidence logit biasing by adding a bonus $\Delta z_v = \lambda \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to draft model logits prior to sampling.
+We systematically evaluated draft-time evidence logit biasing by injecting an additive bonus $\Delta z_v = \lambda \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to the draft model logits prior to sampling.
+
+\paragraph{Teacher-Forced TV Audit vs.\ Dynamic Speculative Rollouts:}
+A critical methodological distinction exists between teacher-forced prefix evaluation and free-running speculative rollouts. In our preliminary fixed-prefix audit ($N=9,331$ teacher-forced prefixes from gold target trajectories), evidence logit biasing produced only negligible changes in expected acceptance ($1 - \text{TV}(p, q) = \sum_v \min(p(v), q(v))$, $\Delta \le +0.11\text{ pp}$). However, during actual iterative speculative drafting across 300 held-out claims (Table \ref{tab:direction_a_polarity}), logit biasing exerts a compounding distortion: the drafter is coerced into proposing evidence tokens out of grammatical context, generating proposals that the unconditioned target verifier immediately rejects ($p(x) \ll q(x)$). Consequently, empirical acceptance $\alpha_{\text{eval}}$ collapses from $78.20\% \to 62.40\%$ as $\lambda$ increases to $1.0$, severely degrading throughput from $43.28 \to 32.14\text{ tok/s}$.
 
 \begin{table}[ht]
 \centering
