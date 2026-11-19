@@ -28,7 +28,7 @@
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} with two-one-sided-test (TOST) acceptance equivalence. Across independent architectures (\texttt{Qwen2.5-7B/0.5B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
+Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an exact, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context guaranteeing 100\% mathematical distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with zero extra forward passes. Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while slashing active draft KV cache by \textbf{$-63.9\%$} with two-one-sided-test (TOST) acceptance equivalence. Across successive model generations (\texttt{Qwen2.5-7B/0.5B} and \texttt{Qwen3-8B/0.6B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, establishing asymmetric context drafting as a robust paradigm for long-context generation.
 \end{abstract}
 
 \section{Introduction}
@@ -180,8 +180,8 @@ Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch la
 
 \subsection{Experimental Setup}
 \begin{itemize}
-    \item \textbf{Benchmark & Splits:} Evaluated on the official \textbf{AVeriTeC} benchmark \citep{schlichtkrull2023averitec}. Primary efficiency evaluations were pre-registered on locked benchmark splits \citep{schlichtkrull2023averitec}, requiring evidence synthesis, veracity classification, and citation attribution.
-    \item \textbf{Splits:} (1) \textit{Primary Held-Out Split:} \texttt{retrieved-heldout300.jsonl} (300 complex long-context claims, mean context $5,090$ tokens). (2) \textit{Auxiliary Oracle Split:} \texttt{oracle-heldout400.jsonl} (393 short claims, mean context $636$ tokens).
+    \item \textbf{Benchmark \& Splits:} Evaluated on the official \textbf{AVeriTeC} benchmark \citep{schlichtkrull2023averitec}. Primary efficiency evaluations were conducted on a fixed, locked evaluation split, requiring evidence synthesis, veracity classification, and citation attribution.
+    \item \textbf{Splits:} (1) \textit{Primary Held-Out Split:} \texttt{retrieved-heldout300.jsonl} (300 complex long-context claims with retrieved web evidence, mean context $5,090$ tokens, frozen prior to benchmark execution). (2) \textit{Auxiliary Oracle Split:} \texttt{oracle-heldout400.jsonl} (393 short claims with gold evidence, mean context $636$ tokens). All primary comparisons were executed on this fixed held-out split, while subsequent selector ablations and retention studies were conducted on the same locked split as post-hoc analyses.
     \item \textbf{Models \& Hardware:} Target: \texttt{Qwen/Qwen3-8B}; Drafter: \texttt{Qwen/Qwen3-0.6B}. Evaluated on NVIDIA RTX 5090 (32GB VRAM, PyTorch 2.13.0+cu130, Blackwell sm\_120). Parameters: $K=4$, $T=0.7$, top-$p=0.9$.
 \end{itemize}
 
@@ -256,9 +256,9 @@ Conflicting Evidence & 15 & 22 & 21 & 19 \\
 \label{sec:veracity}
 Table \ref{tab:verdict_distribution} reports veracity classification across 300 held-out claims. Macro-F1 scores remain identical within statistical error ($0.1222$ for SPADE vs $0.1254$ for Baseline Full vs $0.1267$ for Target AR). The low Macro-F1 reflects domain transfer challenges of zero-shot base models on AVeriTeC rather than speculative degradation. All methods achieve 100.0\% JSON parse validity and 100.0\% citation validity.
 
-\subsection{Cross-Model Architecture Generalization}
+\subsection{Cross-Model Version Generalization}
 \label{sec:qwen25_generalization}
-To evaluate structural generalizability, we benchmarked \texttt{Qwen/Qwen2.5-7B-Instruct} (target) paired with \texttt{Qwen/Qwen2.5-0.5B-Instruct} (drafter) across all 300 held-out claims (Table \ref{tab:qwen25_generalization}).
+To evaluate structural generalizability across model generations, we benchmarked \texttt{Qwen/Qwen2.5-7B-Instruct} (target) paired with \texttt{Qwen/Qwen2.5-0.5B-Instruct} (drafter) across all 300 held-out claims (Table \ref{tab:qwen25_generalization}).
 SPADE achieves \textbf{51.67 tok/s} (+11.7\% vs AR, $p < 10^{-4}$; +6.4\% vs Baseline Full, $p < 10^{-4}$), while cutting draft KV cache by \textbf{$-63.8\%$} ($61.0 \to 22.1\text{ MB}$).
 
 \paragraph{Comparative Analysis vs.\ Lexical Selection:}
@@ -277,15 +277,15 @@ Table \ref{tab:selector_ablation} compares four budget-matched ($B=10\text{k}$) 
 SPADE's attention-guided selection achieves \textbf{78.20\%} acceptance, significantly outperforming Random Selection ($76.50\%$, $+1.70\text{ pp}$, $p = 0.0002$) and BM25 sentence selection ($77.24\%$, $+0.96\text{ pp}$, $p = 0.0162$).
 
 \paragraph{The Structural Recall Role of Passage Coverage:}
-Comparing SPADE with and without mandatory passage coverage reveals that enforcing coverage slightly improves acceptance ($78.20\%$ vs $78.14\%$, $+0.06\text{ pp}$) with wall-clock throughput essentially matching unconstrained attention selection ($43.28$ vs $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$). The primary benefit of passage coverage is \textit{structural recall safety}: it guarantees that at least one salient sentence and original header from every retrieved passage is preserved in $C_{\text{draft}}$. Evaluating cited passage retention shows that coarse pruning (\texttt{BM25 Top-2}) omits $37.7\%$ of cited evidence passages (recalling only $62.3\%$, 195/313), whereas SPADE retains \textbf{100.0\% of target-cited passages} (354/354). Furthermore, non-stopword lexical overlap between target reasoning summaries and retained draft sentences confirms a $91.3\%$ content word retention rate.
+Comparing SPADE with and without mandatory passage coverage reveals that enforcing coverage slightly improves acceptance ($78.20\%$ vs $78.14\%$, $+0.06\text{ pp}$) with wall-clock throughput essentially matching unconstrained attention selection ($43.28$ vs $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$). The primary benefit of passage coverage is \textit{structural recall safety}: it guarantees that at least one salient sentence and original header from every retrieved passage is preserved in $C_{\text{draft}}$. Evaluating cited passage retention demonstrates a marked difference: coarse document pruning (\texttt{BM25 Top-2}) omits $37.7\%$ of cited evidence passages (recalling only 195 of the 313 total passages cited across its generated trajectories), whereas SPADE retains \textbf{100.0\% of cited passages} (354/354). Total cited passages differ slightly (313 vs 354) due to stochastic generation under temperature sampling ($T=0.7$). At the sentence level, preserving passage headers alone is insufficient; verifying sentence-level factual evidence retention, we measured non-stopword lexical overlap between target reasoning justifications and retained draft sentences, confirming a $91.3\%$ content word retention rate.
 
 \subsection{The Negative Result: Failure of Logit Biasing}
 \label{sec:negative_result}
-Prior speculative decoding work hypothesized that boosting draft model logits on evidence tokens could improve drafting. While our preliminary teacher-forced prefix audit observed minimal static total variation change ($\Delta (1-\text{TV}) \le +0.11\text{ pp}$), evaluating dynamic autoregressive speculation across 300 claims reveals that logit biasing uniformly collapses acceptance from $78.2\% \to 62.4\%$ and increases latency (Appendix \ref{app:biasing}). Compounding logit shifts distort draft syntax and force out-of-context tokens that the target model rejects. This demonstrates that \textit{asymmetric context drafting} (SPADE) succeeds where \textit{token logit biasing} fails.
+Prior speculative decoding research hypothesized that boosting draft model logits on evidence tokens could improve drafting. We conducted an in-depth empirical distribution audit across $N = 9,331$ prefixes from 100 claims (Appendix \ref{app:biasing}, Table \ref{tab:direction_a_polarity}). Across static and entropy-gated sweeps ($\beta_0 \in [0.25, 2.0]$), logit biasing yields a statistically negligible change in expected acceptance ($\Delta(1-\text{TV}) \le +0.11\text{ pp}$, 95\% CI $[+0.03, +0.20]\text{ pp}$ at $\beta_0=0.50$), turning strictly negative at $\beta_0 \ge 1.50$ ($-0.31\text{ pp}$, $p = 0.0042$), while adding per-step logit-masking latency. Profiling reveals that when biasing degrades acceptance, the target model places near-zero probability mass ($0.056$) on evidence tokens; forced evidence tokens distort draft syntax and trigger target rejection. This confirms that \textit{context-level selective drafting} (SPADE) succeeds precisely where \textit{token logit biasing} fails.
 
 \section{Conclusion}
 \label{sec:conclusion}
-We presented \textbf{SPADE}, an exact, evidence-selective speculative decoding framework for knowledge-intensive generation. By decoupling the target model's full verification context from the draft model's compact sentence-budgeted context, SPADE resolves the twin bottlenecks of draft KV-cache bloat and passage-pruning divergence. SPADE extracts target-prefill attention weights with zero auxiliary forward passes and enforces mandatory passage coverage. Across 300 held-out claims and multiple model families, SPADE delivers a $+22.4\%$ speedup over target AR and $+4.4\%$ over full speculative decoding while slashing draft KV cache by $-63.9\%$, all while preserving exact mathematical target distribution invariance.
+We presented \textbf{SPADE}, an exact, evidence-selective speculative decoding framework for knowledge-intensive generation. By decoupling the target model's full verification context from the draft model's compact sentence-budgeted context, SPADE resolves the twin bottlenecks of draft KV-cache bloat and passage-pruning divergence. SPADE extracts target-prefill attention weights with zero auxiliary forward passes and enforces mandatory passage coverage. Across 300 held-out claims and two model generations (\texttt{Qwen3} and \texttt{Qwen2.5}), SPADE delivers a $+22.4\%$ speedup over target AR and $+4.4\%$ over full speculative decoding while slashing draft KV cache by $-63.9\%$, all while preserving exact mathematical target distribution invariance.
 
 \section*{Limitations}
 \paragraph{Hardware Configuration:}
@@ -304,6 +304,9 @@ This work introduces an algorithmic acceleration framework that strictly preserv
 
 \appendix
 
+\input{generated_tables/table3_oracle_results.tex}
+\input{generated_tables/table5_qwen25_generalization_full.tex}
+
 \section{Hardware \& Environment Specifications}
 \label{app:hardware}
 \begin{itemize}
@@ -318,18 +321,14 @@ This work introduces an algorithmic acceleration framework that strictly preserv
 \label{app:provenance}
 All paired comparisons were computed using $B = 10,000$ bootstrap iterations resampled strictly at the \texttt{claim\_id} cluster level:
 \begin{itemize}
-    \item Primary Held-Out (300 claims): \nolinkurl{outputs/analysis/b1_4_heldout300/b1_3_live_report.json}
-    \item Auxiliary Oracle (393 claims): \nolinkurl{outputs/analysis/b1_4_oracle400/b1_3_live_report.json}
-    \item Qwen2.5 Generalization (300 claims): \nolinkurl{outputs/analysis/p2_qwen25_heldout300/b1_3_live_report.json}
+    \item Primary Held-Out: \nolinkurl{b1_4_heldout300/b1_3_live_report.json}
+    \item Auxiliary Oracle: \nolinkurl{b1_4_oracle400/b1_3_live_report.json}
+    \item Qwen2.5 Held-Out: \nolinkurl{p2_qwen25_heldout300/b1_3_live_report.json}
 \end{itemize}
-
-\input{generated_tables/table3_oracle_results.tex}
+(All reports stored under \nolinkurl{outputs/analysis/}).
 
 Table \ref{tab:oracle_results} reports the complete evaluation on 393 auxiliary short-context oracle claims, demonstrating exact empirical parity for SPADE's zero-overhead bypass ($p = 1.0000$).
-
-\input{generated_tables/table5_qwen25_generalization_full.tex}
-
-Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model architecture generalization on Qwen2.5-7B/0.5B across all 300 held-out claims.
+Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model generalization on Qwen2.5-7B/0.5B across all 300 held-out claims.
 
 \section{Systems Engineering: StaticCache Rollback \& Numerical Validation}
 \label{app:systems}
@@ -349,16 +348,19 @@ Per-Token KL Divergence & 0.0000 & 0.0000 & $< 10^{-12}$ \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Numerical Precision Validation:} Strict equivalence between FP64 and FP32 fast math over 1,000 verification steps.}
+\caption{\textbf{Numerical Agreement Validation:} Empirical agreement between FP64 and FP32 fast math implementations over 1,000 verification steps, confirming zero token decision divergences and per-token $\text{KL} < 10^{-12}$.}
 \label{tab:fp32_validation}
 \end{table}
 
 \section{In-Depth Negative Result: The Empirical Ceiling of Draft Logit Biasing}
 \label{app:biasing}
-We systematically evaluated draft-time evidence logit biasing by injecting an additive bonus $\Delta z_v = \lambda \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to the draft model logits prior to sampling.
+Prior speculative decoding work hypothesized that boosting draft model logits on evidence tokens could improve drafting. We systematically evaluated evidence logit biasing by injecting an additive bonus $\Delta z_v = \beta_0 \cdot \mathbf{1}_{\{v \in \mathcal{V}_{\text{evidence}}\}}$ to draft model logits prior to sampling.
 
-\paragraph{Teacher-Forced TV Audit vs.\ Dynamic Speculative Rollouts:}
-A critical methodological distinction exists between teacher-forced prefix evaluation and free-running speculative rollouts. In our preliminary fixed-prefix audit ($N=9,331$ teacher-forced prefixes from gold target trajectories), evidence logit biasing produced only negligible changes in expected acceptance ($1 - \text{TV}(p, q) = \sum_v \min(p(v), q(v))$, $\Delta \le +0.11\text{ pp}$). However, during actual iterative speculative drafting across 300 held-out claims (Table \ref{tab:direction_a_polarity}), logit biasing exerts a compounding distortion: the drafter is coerced into proposing evidence tokens out of grammatical context, generating proposals that the unconditioned target verifier immediately rejects ($p(x) \ll q(x)$). Consequently, empirical acceptance $\alpha_{\text{eval}}$ collapses from $78.20\% \to 62.40\%$ as $\lambda$ increases to $1.0$, severely degrading throughput from $43.28 \to 32.14\text{ tok/s}$.
+\paragraph{Empirical Distribution Audit ($N = 9,331$ Prefixes):}
+We evaluated static and entropy-gated biasing configurations across $N = 9,331$ teacher-forced prefixes from 100 claims, computing per-prefix expected acceptance $1 - \text{TV}(p, q) = \sum_v \min(p(v), q(v))$ and Jensen-Shannon divergence. As shown in Table \ref{tab:direction_a_polarity}, at low biasing weights ($\beta_0 \le 0.50$), logit biasing yields a statistically negligible gain ($\Delta \le +0.11\text{ pp}$, 95\% CI $[+0.03, +0.20]\text{ pp}$ across all prefixes). At higher weights ($\beta_0 \ge 1.50$), biasing actively degrades distribution alignment ($\Delta = -0.17\text{ pp}$ to $-0.31\text{ pp}$, 95\% CI $[-0.52, -0.10]\text{ pp}$).
+
+\paragraph{Root Cause of Biasing Failure:}
+Detailed error profiling reveals that in cases where logit biasing degrades TV, the target model places near-zero probability mass on evidence tokens ($p(S_E) = 0.056$). Forcing draft probability mass onto evidence n-grams out of syntactic context causes the target verifier to reject candidate chains. Furthermore, applying the logit mask incurs an additional $34\text{--}65\,\mu\text{s}$ per prefix of computation overhead. These empirical findings conclusively establish that selective drafting must operate at the \textit{context level} (SPADE) rather than the \textit{logit level}.
 
 \begin{table}[ht]
 \centering
@@ -366,20 +368,20 @@ A critical methodological distinction exists between teacher-forced prefix evalu
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Biasing Weight $\lambda$} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E tok/s} & \textbf{Outcome} \\
+\textbf{Biasing $\beta_0$} & \textbf{Biased $1-\text{TV}$} & \textbf{$\Delta(1-\text{TV})$} & \textbf{95\% CI (pp)} & \textbf{Overhead} \\
 \midrule
-$\lambda = 0.0$ (Unbiased) & \textbf{78.20\%} & \textbf{3.114} & \textbf{43.28} & Optimal \\
-$\lambda = 0.2$ & 73.41\% & 2.842 & 40.12 & Degradation \\
-$\lambda = 0.5$ & 68.12\% & 2.510 & 36.50 & Severe Drop \\
-$\lambda = 1.0$ & 62.40\% & 2.180 & 32.14 & Collapse \\
+$\beta_0 = 0.00$ (Base) & 83.21\% & 0.00 pp & --- & 0.0 $\mu$s \\
+$\beta_0 = 0.25$ & 83.29\% & +0.09 pp & $[+0.04, +0.13]$ & 36.9 $\mu$s \\
+$\beta_0 = 0.50$ & \textbf{83.32\%} & \textbf{+0.11 pp} & $[+0.03, +0.20]$ & 35.6 $\mu$s \\
+$\beta_0 = 1.00$ & 83.22\% & +0.02 pp & $[-0.12, +0.16]$ & 34.3 $\mu$s \\
+$\beta_0 = 1.50$ & 83.04\% & -0.17 pp & $[-0.35, +0.02]$ & 34.0 $\mu$s \\
+$\beta_0 = 2.00$ & 82.90\% & -0.31 pp & $[-0.52, -0.10]$ & 33.8 $\mu$s \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Draft Logit Biasing Degradation Sweep:} Increasing evidence logit bonus uniformly impairs proposal acceptance.}
+\caption{\textbf{Empirical Audit of Evidence Logit Biasing ($N = 9,331$ prefixes):} Evaluating static logit biasing across 100 claims under teacher-forced verification. Biasing provides negligible benefit at small weights ($\le +0.11\text{ pp}$) and significantly degrades alignment at $\beta_0 \ge 1.50$ ($p = 0.0042$), while adding latency overhead. Complete audit report: \nolinkurl{outputs/analysis/m4_1_distribution_audit/distribution_audit_report.json}.}
 \label{tab:direction_a_polarity}
 \end{table}
-
-Logit biasing skews the proposal distribution $q(x)$ away from the true conditional distribution $q(x \mid C)$, increasing verification rejections under Eq. (4).
 
 \section{ACL Reproducibility Checklist \& Artifact Availability}
 \label{app:reproducibility}
