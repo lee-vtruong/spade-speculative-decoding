@@ -350,7 +350,16 @@ def build_draft_context(
         min_sentences_per_passage: Minimum sentences retained per passage.
         seed: Random seed for randomized baselines.
     """
-    valid_policies = {"full", "selective_topk", "compact", "hybrid_topk_compact", "sentence_budget", "random_sentence_budget"}
+    valid_policies = {
+        "full",
+        "no_evidence",
+        "sliding_window",
+        "selective_topk",
+        "compact",
+        "hybrid_topk_compact",
+        "sentence_budget",
+        "random_sentence_budget",
+    }
     if policy not in valid_policies:
         raise ValueError(f"Unsupported draft context policy: {policy!r}")
 
@@ -388,7 +397,44 @@ def build_draft_context(
             context_selection_s=0.0,
         )
 
+    if policy == "no_evidence":
+        draft_prompt, draft_hash = build_prompt(claim, [], mode=ev_mode)
+        return DraftContextResult(
+            policy="no_evidence",
+            draft_prompt=draft_prompt,
+            draft_prompt_hash=draft_hash,
+            selected_evidence_ids=[],
+            total_evidence_count=len(evidence),
+            selected_evidence_count=0,
+            full_evidence_chars=full_chars,
+            draft_evidence_chars=0,
+            context_selection_s=0.0,
+        )
+
     t0 = time.perf_counter()
+    if policy == "sliding_window":
+        # StreamingLLM-style: initial sink (first sentence of passage 1) + trailing evidence sentences up to budget
+        pass_sents = [split_evidence_sentences_with_spans(str(e.get("text", ""))) for e in evidence]
+        sink_sent = pass_sents[0][0][0] if pass_sents and pass_sents[0] else ""
+        tail_sents = []
+        cur_chars = len(sink_sent)
+        # gather from reverse (tail sliding window)
+        for p_idx in reversed(range(len(evidence))):
+            for tup in reversed(pass_sents[p_idx]):
+                s = tup[0]
+                if cur_chars + len(s) + 1 <= budget_chars:
+                    tail_sents.append(s)
+                    cur_chars += len(s) + 1
+                else:
+                    break
+            if cur_chars >= budget_chars:
+                break
+        tail_sents.reverse()
+        combined_text = (sink_sent + "\n... [omitted] ...\n" + "\n".join(tail_sents)).strip()
+        selected = [{"evidence_id": "SW", "text": combined_text}]
+        draft_prompt, draft_hash = build_prompt(claim, selected, mode=ev_mode)
+        sel_ids = ["SW"]
+        draft_chars = len(combined_text)
     if policy == "selective_topk":
         if top_k < 0:
             raise ValueError("top_k must be non-negative")

@@ -37,7 +37,7 @@ def main():
     p.add_argument("--order-decay",type=float,default=0.5,help="Higher-order n-gram scaling factor for M4 biasing")
     p.add_argument("--entropy-threshold",type=float,default=2.0,help="Entropy threshold (nats) for sigmoid gating in M4")
     p.add_argument("--max-boost-cap",type=float,default=3.0,help="Upper bound on applied logit boost in M4")
-    p.add_argument("--draft-context-policy",choices=["full","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
+    p.add_argument("--draft-context-policy",choices=["full","no_evidence","sliding_window","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
     p.add_argument("--draft-top-k",type=int,default=2,help="Evidence passages retained for draft under selective_topk / hybrid_topk_compact")
     p.add_argument("--draft-compact-sentences",type=int,default=1,help="Max claim-salient sentences per evidence passage under compact / hybrid_topk_compact")
     p.add_argument("--draft-compact-chars",type=int,default=160,help="Max characters per evidence passage under compact / hybrid_topk_compact")
@@ -66,7 +66,7 @@ def main():
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
     if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
     if a.max_boost_cap < 0.0: p.error("--max-boost-cap must be non-negative")
-    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or a.draft_budget_chars < 256 or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
+    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or (a.draft_context_policy not in {"no_evidence"} and a.draft_budget_chars < 256) or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
     rows=read_jsonl(a.input)
     if a.limit is not None: rows=rows[:a.limit]
     if not rows: p.error("Input JSONL has no examples")
