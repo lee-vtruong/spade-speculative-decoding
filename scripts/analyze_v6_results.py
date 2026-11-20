@@ -572,7 +572,7 @@ def main() -> None:
         dev = json.loads(dev_path.read_text(encoding="utf-8"))
         lines = []
         for r in dev["results"]:
-            cfg = r["config"].replace("upper50, W=16, mean-head, sum, B=10k", "Default: upper50, W=16, mean, sum, B=10k").replace("_", "\\_")
+            cfg = r["config"].replace("SPADE Default (upper50, W=16, mean-head, sum, B=10k)", "SPADE Default (upper50, W=16, mean, sum, B=10k)").replace("_", "\\_")
             lines.append(f"{cfg} & {r['mean_draft_prompt_tokens']:,.1f} & {r['mean_expected_acceptance_pct']:.2f}\\% \\\\")
         tex = (
             "\\begin{table}[t]\n\\centering\n\\small\n\\resizebox{\\columnwidth}{!}{%\n"
