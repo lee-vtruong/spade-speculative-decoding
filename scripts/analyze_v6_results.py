@@ -72,8 +72,8 @@ def _extract_final_answer(raw_text: str) -> str:
 
 def _extract_run_claims(run_dir: Path, bench_answers: dict[str, list[str]] | None = None) -> dict[str, dict[str, Any]]:
     trials = [json.loads(l) for l in (run_dir / "trial_metrics.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    rounds = [json.loads(l) for l in (run_dir / "round_traces.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    tokens = [json.loads(l) for l in (run_dir / "token_traces.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    rounds = [json.loads(l) for l in (run_dir / "round_traces.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()] if (run_dir / "round_traces.jsonl").exists() else []
+    tokens = [json.loads(l) for l in (run_dir / "token_traces.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()] if (run_dir / "token_traces.jsonl").exists() else []
     preds = {str(r["claim_id"]): r for r in (json.loads(l) for l in (run_dir / "predictions.jsonl").read_text(encoding="utf-8").splitlines() if l.strip())}
 
     claims: dict[str, dict[str, Any]] = {}
@@ -418,13 +418,47 @@ def main() -> None:
         for lbl, padj in zip(ko, holm_bonferroni(rps)):
             lb_vs_full[lbl]["p_holm"] = round(padj, 4)
 
+    lb_pairwise = {}
+    for ta, tb in [
+        ("SPADE B=10k", "Target AR (B0-S)"),
+        ("SPADE B=10k", "BM25 Sent-B10k"),
+        ("SPADE B=10k", "KV-Sparse (B=1,776)"),
+        ("SPADE B=10k", "Prompt-Lookup (PLD)"),
+        ("SPADE B=10k", "SPADE B=2k"),
+    ]:
+        if ta in lb["cmaps"] and tb in lb["cmaps"]:
+            entry = {"e2e_tok_s": _boot(lb["cmaps"][tb], lb["cmaps"][ta], "e2e_tok_s")}
+            if tb != "Target AR (B0-S)":
+                entry["alpha_eval_pct"] = _boot(lb["cmaps"][tb], lb["cmaps"][ta], "alpha_eval_pct")
+            lb_pairwise[f"{ta} vs {tb}"] = entry
+    if lb_pairwise:
+        p_lt = holm_bonferroni([v["e2e_tok_s"]["p_raw"] for v in lb_pairwise.values()])
+        for v, pt_i in zip(lb_pairwise.values(), p_lt):
+            v["e2e_tok_s"]["p_holm"] = round(pt_i, 4)
+        alpha_items = [v["alpha_eval_pct"] for v in lb_pairwise.values() if "alpha_eval_pct" in v]
+        if alpha_items:
+            for v_a, pa_i in zip(alpha_items, holm_bonferroni([x["p_raw"] for x in alpha_items])):
+                v_a["p_holm"] = round(pa_i, 4)
+
+    lb_qa_f1_holm = {}
+    for ta, tb in [
+        ("SPADE B=10k", "Target AR (B0-S)"),
+        ("SPADE B=10k", "Baseline Full"),
+        ("SPADE B=2k", "Target AR (B0-S)"),
+    ]:
+        if ta in lb["cmaps"] and tb in lb["cmaps"]:
+            lb_qa_f1_holm[f"{ta} vs {tb}"] = _boot(lb["cmaps"][tb], lb["cmaps"][ta], "qa_f1_pct")
+    if lb_qa_f1_holm:
+        for v_f, pf_i in zip(lb_qa_f1_holm.values(), holm_bonferroni([x["p_raw"] for x in lb_qa_f1_holm.values()])):
+            v_f["p_holm"] = round(pf_i, 4)
+
     # 4. Theorem 1 (300 claims + teacher-forced)
     thm1_300 = analyze_theorem1_300()
 
     master = {
         "heldout300_holm": h300_comps,
         "long173": {"rows": l173["rows"], "vs_full": l173_vs_full, "pairwise_holm": l173_pairwise},
-        "longbench": {"rows": lb["rows"], "vs_full": lb_vs_full},
+        "longbench": {"rows": lb["rows"], "vs_full": lb_vs_full, "pairwise_holm": lb_pairwise, "qa_f1_holm": lb_qa_f1_holm},
         "theorem1_300": thm1_300,
     }
     (REV_DIR / "v6_master_analysis.json").write_text(json.dumps(master, indent=2) + "\n", encoding="utf-8")
@@ -507,17 +541,18 @@ def main() -> None:
             t_pre = f"{d['target_8b_prefill_ms']:.1f}" if "target_8b_prefill_ms" in d else "—"
             hk = f"{d['hook_ms']:.2f} ms / {d['hook_peak_delta_mb']:.1f} MB" if "hook_ms" in d else "—"
             df_pre = f"{d['full_draft_prefill_ms']:.1f} -> {d['spade_draft_prefill_ms']:.1f}" if "target_8b_prefill_ms" in d else f"{d['full_draft_prefill_ms']:.1f} -> 25.2"
-            tot_pre = f"{d['total_prefill_full_ms']:.0f} -> {d['total_prefill_spade_ms']:.0f} (-{d['total_prefill_saved_pct']:.1f}\\%)" if "total_prefill_full_ms" in d else "—"
+            tot_pre = f"{d['total_prefill_full_ms']:.0f} -> {d['total_prefill_spade_ms']:.0f} ({-d['total_prefill_saved_pct']:+.1f}\\%)" if "total_prefill_full_ms" in d else "—"
             ar_e2e = f"{d['ar_e2e_tok_s']:.2f}" if "ar_e2e_tok_s" in d else "OOM"
             fl_e2e = f"{d['full_sd_e2e_tok_s']:.2f} ({d['full_sd_peak_vram_gb']:.1f}G)" if "full_sd_e2e_tok_s" in d else "OOM"
+            sp_alpha = f"{d['spade_alpha_eval_pct']:.1f}\\%" if "spade_alpha_eval_pct" in d else "—"
             sp_e2e = f"\\textbf{{{d['spade_e2e_tok_s']:.2f}}} ({d['spade_peak_vram_gb']:.1f}G)" if "spade_e2e_tok_s" in d else "OOM"
             df_pre = df_pre.replace("->", "$\\to$")
             tot_pre = tot_pre.replace("->", "$\\to$")
-            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_e2e} \\\\")
+            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_alpha} & {sp_e2e} \\\\")
         tex = (
             "\\begin{table*}[t]\n\\centering\n\\small\n\\resizebox{\\textwidth}{!}{%\n"
-            "\\begin{tabular}{lccccccr}\n\\toprule\n"
-            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE tok/s (VRAM)} \\\\\n"
+            "\\begin{tabular}{lcccccccr}\n\\toprule\n"
+            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
             "\\caption{\\textbf{End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{logits\\_to\\_keep=1}):} Reports target prefill, exact hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM. While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute at 16k--32k tokens.}\n"
             "\\label{tab:long_context_scaling}\n\\end{table*}\n"
