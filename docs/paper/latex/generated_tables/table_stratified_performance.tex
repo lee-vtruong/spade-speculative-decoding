@@ -14,6 +14,6 @@ Dense ($L \ge 20\text{k}$) & 124 (41.3\%) & 10,111.5 tok & \textbf{-74.4\%} & 31
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Context-Stratified Decoding Efficiency on Held-Out Split (Qwen3):} Throughput in tok/s. We report both \textit{Aggregate Throughput} ($\sum \text{Tokens} / \sum \text{Time}$, as in Table \ref{tab:main_results}) and unweighted \textit{Per-Claim Mean Throughput}. In the bypass cohort ($L \le 10\text{k}$ chars), throughput difference (+0.19 tok/s, 95\% CI $[-0.37, +0.89]$, $p=0.29$) is statistically indistinguishable from zero, confirming negligible bypass overhead. Real throughput acceleration concentrates strictly on long documents ($+5.4\%$ to $+6.0\%$ aggregate; $+1.57$ to $+1.75\text{ tok/s}$ per-claim mean, $p < 10^{-4}$), where active draft KV cache is cut by $-69.4\%$ to $-74.4\%$. Both evaluated acceptance $\alpha_{\text{eval}}$ (evaluated candidate token acceptance) and proposal acceptance $\alpha_{\text{prop}}$ (accepted tokens over $K \times \text{rounds}$) are preserved across all strata.}
+\caption{\textbf{Context-Stratified Efficiency (AVeriTeC Qwen3, tok/s):} Reports aggregate ($\sum \text{tok}/\sum \text{time}$) and per-claim mean throughput. Bypass ($L\le 10\text{k}$) shows parity with Full-SD ($p=0.29$); gains concentrate on long claims ($+5.4\%$ to $+6.0\%$ aggregate, $+1.57$ to $+1.75\text{ tok/s}$ per-claim, $p<10^{-4}$) while preserving $\alpha_{\text{eval}}$ and $\alpha_{\text{prop}}$.}
 \label{tab:stratified_performance}
 \end{table*}

@@ -14,9 +14,11 @@
 \usepackage{microtype}
 \usepackage{cleveref}
 
-\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
-\setlength{\floatsep}{8pt plus 2pt minus 2pt}
-\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{7pt plus 2pt minus 2pt}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}[theorem]{Lemma}
@@ -32,7 +34,7 @@
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model (LLM) inference by verifying multiple draft tokens in parallel. However, in knowledge-intensive generation over long retrieved contexts (e.g., multi-document fact-checking), standard speculative decoding encounters a severe bottleneck: processing extensive evidence ($5\text{k}$--$8\text{k}+$ tokens) in the draft model creates linearly expanding KV-cache memory footprints ($M_{\text{KV}} \propto S$) and quadratic prompt prefill compute latency ($O(S^2)$), inflating draft step times and eroding speculative speedup. Conversely, naive passage pruning degrades proposal acceptance by dropping critical facts. We present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), a distribution-preserving, asymmetric context speculative decoding framework. SPADE decouples the target and draft contexts: the target verifier retains full context preserving mathematical target distribution invariance (Theorem \ref{thm:invariance}), while the draft model operates on a compact sentence-budgeted context ($B=10\text{k}$ chars) selected via upper-layer target self-attention weights extracted during target prefill with no extra forward pass (0.163 ms/tok overhead). Evaluated on 300 held-out AVeriTeC claims using \texttt{Qwen3-8B} and \texttt{Qwen3-0.6B} on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput---a statistically significant \textbf{+22.4\%} speedup over target autoregression and \textbf{+4.4\%} over full-context speculative decoding ($p < 10^{-4}$), while reducing active draft KV cache by \textbf{$-63.9\%$} and preserving token acceptance within a practical $\pm 1.0\text{ pp}$ equivalence margin ($78.20\%$ vs.\ $78.16\%$). Across successive model generations (\texttt{Qwen2.5-7B/0.5B} and \texttt{Qwen3-8B/0.6B}), SPADE demonstrates $+11.7\%$ speedup over autoregression and $-63.8\%$ KV reduction, demonstrating asymmetric context drafting as an effective approach for long-context generation.
+Speculative decoding accelerates LLM inference via parallel verification, yet over long retrieved contexts ($5\text{k}$--$18\text{k}$ tokens) full drafting inflates draft KV-cache memory ($M_{\text{KV}} \propto S$) and prefill compute ($O(S^2)$), while naive passage pruning drops critical facts and stalls acceptance. We present \textbf{SPADE}, a distribution-preserving asymmetric speculative decoding framework: the target verifier retains full context to preserve the target distribution via residual verification (Theorem \ref{thm:invariance}), while the draft model conditions on a compact sentence-budgeted context selected via upper-layer target attention weights captured during target prefill with no auxiliary forward pass ($0.163\text{ ms/tok}$ amortized). On 300 held-out AVeriTeC claims (\texttt{Qwen3-8B/0.6B}, RTX 5090), SPADE reaches \textbf{43.28 tok/s} (\textbf{+22.4\%} vs.\ AR, \textbf{+4.4\%} vs.\ Full-SD, $p_{\text{Holm}} < 10^{-4}$), cuts active draft KV by \textbf{$-63.9\%$}, and preserves acceptance ($78.20\%$ vs.\ $78.16\%$). On all $173$ long claims ($>10\text{k}$ chars), SPADE outperforms SnapKV-style \texttt{KV-Sparse} ($+2.09\text{ tok/s}$, $p_{\text{Holm}} < 10^{-4}$) and Prompt-Lookup ($+10.54\text{ tok/s}$), matches zero-GPU BM25 sentence budgeting in wall-clock speed, and improves acceptance ($+0.96\text{ pp}$ overall, $p_{\text{Holm}}=0.0066$). SPADE transfers to \texttt{Qwen2.5-7B/0.5B} ($+11.7\%$ vs.\ AR, $-63.8\%$ KV) and \textbf{LongBench HotpotQA} ($N=100$, mean $14,083$ tok: $-79.7\%$ draft KV, $+1.37\text{ tok/s}$ vs.\ Full-SD, $p_{\text{Holm}} < 10^{-4}$, preserved QA F1/Sub-EM), while $16\text{k}$--$32\text{k}$ scaling analysis identifies when target KV traffic dominates beyond $\sim 14\text{k}$ tokens.
 \end{abstract}
 
 \section{Introduction}
@@ -48,19 +50,19 @@ In knowledge-intensive generation tasks---such as multi-document question answer
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=1\textwidth]{figures/spade_overview.pdf}
-\caption{\textbf{Architectural Overview of SPADE:} (1) The target model processes full prompt context $C_{\text{full}}$ in prefill. (2) \texttt{TargetPrefillAttentionHook} extracts upper-layer causal self-attention weights from terminal prompt query tokens $I_{\text{tail}}$ attending back to evidence keys with no extra forward pass (0.163 ms/tok overhead). (3) Salient sentences are packed across all passages up to budget $B_{\text{chars}}$, guaranteeing 100\% passage coverage while discarding $\sim$65\% of low-attention tokens (with minimal-overhead bypass on short evidence). (4) The draft model speculates $K$ candidate tokens at high throughput via compiled FlexAttention and StaticCache. (5) Proposals are verified simultaneously by the target model under exact speculative residual sampling, preserving exact target distribution invariance (Theorem \ref{thm:invariance}).}
+\includegraphics[width=0.90\textwidth]{figures/spade_overview.pdf}
+\caption{\textbf{SPADE Overview:} (1) Target prefills $C_{\text{full}}$; (2) \texttt{TargetPrefillAttentionHook} scores sentences from upper-layer terminal queries ($0.163\text{ ms/tok}$ amortized, zero extra forward passes); (3) Greedy packing under budget $B$ with per-passage coverage ($m/m$) trims $\sim$65\% draft tokens (bypassing short inputs); (4) Compiled FlexAttention/StaticCache drafter proposes $K$ tokens verified via residual sampling (Theorem \ref{thm:invariance}).}
 \label{fig:spade_overview}
 \end{figure*}
 
-To overcome this dilemma, we present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence). SPADE introduces an \textbf{asymmetric evidence context architecture} that decouples the target verifier from the draft proposer. The target model retains the full uncompressed context $C_{\text{full}}$, mathematically guaranteeing that the sampled token distribution is identical to standard target autoregressive generation under temperature and top-$p$ filtering (Theorem \ref{thm:invariance}). Meanwhile, the draft model operates on a compact, sentence-budgeted context $C_{\text{draft}} = g(C_{\text{full}}; B)$, where $g$ denotes budget-constrained evidence selection and repackaging. Crucially, rather than relying on external cross-encoders or coarse document retrieval, SPADE captures target-guided evidence saliency via a low-overhead PyTorch forward hook (0.163 ms/tok) during the target's initial prompt prefill pass. SPADE then packs salient sentences up to a character budget ($B = 10\text{k}$) while enforcing mandatory passage coverage, ensuring that every retrieved document retains at least one representative sentence.
+To overcome this, we present \textbf{SPADE} (\textbf{S}peculative \textbf{P}rompt \textbf{A}ttention-\textbf{D}rafted \textbf{E}vidence), an \textbf{asymmetric evidence context architecture} decoupling target verification from draft proposal. The target retains $C_{\text{full}}$ to preserve its distribution under residual verification (Theorem \ref{thm:invariance}), while the drafter conditions on sentence-budgeted evidence $C_{\text{draft}} = g(C_{\text{full}}; B)$ ($B = 10\text{k}$) scored via a lightweight target-prefill hook ($0.163\text{ ms/tok}$) under a per-passage coverage constraint ($m/m$).
 
 The primary contributions of this paper are:
 \begin{itemize}
-    \item \textbf{Target-Prefill Attention-Guided Sentence Selection:} We design a lightweight forward hook (0.163 ms/tok) capturing upper-layer causal self-attention weights during target prefill, paired with sentence-level greedy packing under a calibrated character budget with a per-passage coverage constraint ($m/m$) and no auxiliary forward passes.
-    \item \textbf{Decoupled Asymmetric Speculative Formulation:} We formalize asymmetric context speculative decoding, showing that conditioning the drafter on an attention-selected evidence subset $C_{\text{draft}} = g(C_{\text{full}}; B)$ while verifying against the full context $C_{\text{full}}$ provides provable target distribution invariance (Theorem \ref{thm:invariance}) without heuristic quality degradation.
-    \item \textbf{Systematic Empirical Acceleration:} On 300 held-out long-context AVeriTeC claims on an NVIDIA RTX 5090, SPADE achieves \textbf{43.28 tok/s} end-to-end throughput (+22.4\% vs.\ AR, +4.4\% vs.\ Full Speculative, $p < 10^{-4}$), reduces active draft KV cache by \textbf{$-63.9\%$}, and preserves token acceptance within a practical $\pm 1.0\text{ pp}$ equivalence margin ($\alpha_{\text{eval}} = 78.20\%$ vs $78.16\%$).
-    \item \textbf{Cross-Model Version Generalization:} Across successive model generations (\texttt{Qwen2.5-7B/0.5B}), SPADE demonstrates robust transferability, delivering a $+11.7\%$ speedup over target AR and $-63.8\%$ draft KV cache reduction.
+    \item \textbf{Target-Prefill Attention-Guided Sentence Selection:} A lightweight hook ($0.163\text{ ms/tok}$) extracting upper-layer causal attention during target prefill, paired with greedy packing and a per-passage coverage constraint ($m/m$) with no auxiliary passes.
+    \item \textbf{Asymmetric Speculative Formulation:} Conditioning the drafter on $C_{\text{draft}} = g(C_{\text{full}}; B)$ while verifying against $C_{\text{full}}$ preserves the target distribution (Theorem \ref{thm:invariance}), verified via seed-noise and teacher-forced audits.
+    \item \textbf{Controlled Empirical Acceleration:} On 300 AVeriTeC claims, SPADE reaches \textbf{43.28 tok/s} ($+22.4\%$ vs.\ AR, $+4.4\%$ vs.\ Full-SD, $p_{\text{Holm}} < 10^{-4}$), cuts draft KV \textbf{$-63.9\%$}, preserves acceptance ($78.20\%$ vs.\ $78.16\%$), and beats \texttt{KV-Sparse} ($+2.09\text{ tok/s}$) and \texttt{PLD} ($+10.54\text{ tok/s}$) on $N=173$ long claims.
+    \item \textbf{Cross-Model \& Cross-Task Generalization:} SPADE transfers to \texttt{Qwen2.5-7B/0.5B} ($+11.7\%$ vs.\ AR, $-63.8\%$ KV) and \textbf{LongBench HotpotQA} ($N=100$, mean $14,083$ tok: $-79.7\%$ KV, $+1.37\text{ tok/s}$ vs.\ Full-SD, $p_{\text{Holm}} < 10^{-4}$; preserved QA F1/Sub-EM) while identifying target-KV dominance beyond $14\text{k}$--$16\text{k}$ tokens.
 \end{itemize}
 
 \section{Related Work}
@@ -105,11 +107,11 @@ To identify salient evidence sentences without auxiliary neural models or extra 
 
 In autoregressive decoder-only LLMs, prompt tokens are causally masked: tokens cannot attend to subsequent positions. The input prompt is structured as $\text{Instructions} \to \text{Claim } c \to \text{Evidence } \mathcal{E} \to \text{Trigger } \tau$ (e.g., \texttt{JSON: \{"summary":"...}). To ensure query tokens have full causal visibility over all evidence passages $\mathcal{E}$, SPADE hooks the \textit{terminal query window} $I_{\text{tail}} = \{P - W + 1, \dots, P\}$ ($W=16$ tokens, prompt length $P$). Because $I_{\text{tail}}$ follows all evidence passages, its queries $Q_{\text{tail}}$ causally attend to all preceding evidence keys $K_{\text{evidence}}$.
 
-Crucially, modern inference engines use fused attention kernels (e.g., FlashAttention or PyTorch SDPA) that do not materialize the $P \times P$ attention matrix. Instead of requiring an unfused full forward pass, SPADE registers a lightweight pre-hook on the self-attention modules of upper layers $L_{\text{upper}}$ (upper 50\% of layers, $\{L/2, \dots, L-1\}$), capturing only the final $W=16$ hidden states $h_{\text{tail}}$ and RoPE embeddings. After target prefill populates the standard key-value cache, SPADE projects $h_{\text{tail}}$ via $W_q$ and executes a narrow $W \times P$ matrix multiplication against cached keys $K \in \mathbb{R}^{P \times d}$:
+Crucially, modern inference engines use fused attention kernels (e.g., FlashAttention or PyTorch SDPA) that do not materialize the $P \times P$ attention matrix. Instead of requiring an unfused full forward pass, SPADE registers a lightweight pre-hook on the self-attention modules of upper layers $L_{\text{upper}}$ (upper 50\% of layers, $\{L/2, \dots, L-1\}$), capturing only the final $W=16$ hidden states $h_{\text{tail}}$ and RoPE cosine/sine embeddings. After target prefill populates the standard key-value cache, SPADE projects $h_{\text{tail}}$ via $W_q$, applies per-head QK-Norm (when present, e.g., \texttt{Qwen3}) and RoPE, broadcasts across grouped-query attention (GQA) key heads, applies the bottom-right $W \times W$ causal mask, and computes FP32 softmax over $W \times P$ scores against cached keys $K \in \mathbb{R}^{P \times d}$:
 \begin{equation}
 A_{\text{tail} \to j} = \frac{1}{|L_{\text{upper}}|} \sum_{l \in L_{\text{upper}}} \frac{1}{H} \sum_{h=1}^H \frac{1}{W} \sum_{i \in I_{\text{tail}}} \left[\text{Softmax}\left(\frac{Q_{l, i}^h K_{l}^{h\top}}{\sqrt{d_k}}\right)\right]_j
 \end{equation}
-Because $W=16 \ll P$, this operation scales as $O(W \cdot P)$ rather than $O(P^2)$, requiring only $\approx 33\text{ MB}$ memory even at $P=32\text{k}$ (vs.\ $>2\text{ GB}$ for $P \times P$) and adding negligible prefill overhead ($0.163\text{ ms/tok}$). For each candidate sentence $s \in \mathcal{E}$ spanning token indices $[s_{\text{start}}, s_{\text{end}})$, its saliency score $S(s)$ is the aggregated attention mass across its tokens:
+Because $W=16 \ll P$, hook computation scales linearly as $O(W \cdot P)$ rather than $O(P^2)$: across $P \in [2\text{k}, 32\text{k}]$ on \texttt{Qwen3-8B} (18 hooked layers), measured peak allocator delta VRAM scales from $19.1\text{ MB}$ ($6.5\text{ ms}$) at $2\text{k}$ to $73.7\text{ MB}$ ($9.2\text{ ms}$) at $8\text{k}$ and $291.0\text{ MB}$ ($30.6\text{ ms}$) at $32\text{k}$ tokens---roughly an order of magnitude smaller than unfused $P \times P$ matrices---while amortizing to $0.163\text{ ms/tok}$ on our 300-claim workload. Direct verification against eager \texttt{output\_attentions=True} confirms numerical faithfulness: worst-case max error is $5.96 \times 10^{-8}$ on \texttt{Qwen3-0.6B} (FP32, Pearson $r = 1.0000$), and mean $r = 0.99999$ ($\min$ Spearman $\rho = 0.9998$, $99.1\%$ top-64 token overlap) on \texttt{Qwen3-8B} BF16 (Appendix \ref{app:hardware}). For each candidate sentence $s \in \mathcal{E}$ spanning token indices $[s_{\text{start}}, s_{\text{end}})$, its saliency score $S(s)$ is the aggregated attention mass across its tokens:
 \begin{equation}
 S(s) = \sum_{j = s_{\text{start}}}^{s_{\text{end}} - 1} A_{\text{tail} \to j}
 \end{equation}
@@ -175,73 +177,37 @@ Under PyTorch eager execution, speculative decoding failed to achieve wall-clock
 \paragraph{FlexAttention + StaticCache:}
 Dynamic tensor allocation and KV resizing during draft rollback created substantial CPU-GPU synchronization stalls. We integrated PyTorch 2.13 \texttt{FlexAttention} paired with pre-allocated \texttt{StaticCache}. KV cache rollback is performed via an $O(1)$ in-place cache pointer decrement without memory reallocation.
 \paragraph{CUDA Graph Execution via Reduce-Overhead:}
-Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch latency ($\approx 1.2\text{ ms}$ per call). We apply \texttt{torch.compile(mode="reduce-overhead")} to capture static execution graphs for the draft step. As validated in Appendix \ref{app:systems}, we execute with FP32 fast math, yielding empirically validated numerical agreement ($< 10^{-12}$ per-token KL divergence and zero decision divergence across 15 rollout sequences evaluating 1,194 candidate tokens, Table \ref{tab:fp32_validation}).
-
-\input{generated_tables/table2_latency_decomp.tex}
+Iterative forward calls of a $0.6\text{B}$ model incur substantial CPU launch latency ($\approx 1.2\text{ ms}$ per call). We apply \texttt{torch.compile(mode="reduce-overhead")} to capture static execution graphs for the draft step. As validated in Appendix \ref{app:systems}, we execute with FP32 fast math, yielding empirically validated numerical agreement ($< 10^{-12}$ per-token KL divergence and zero decision divergence across 15 rollout sequences evaluating 1,194 candidate tokens, Table \ref{tab:fp32_validation}; complete E2E latency decomposition in Appendix Table \ref{tab:additive_breakdown}).
 
 \section{Experimental Evaluation}
 \label{sec:experiments}
 
 \subsection{Experimental Setup}
 \begin{itemize}
-    \item \textbf{Benchmark \& Splits:} Evaluated on the official \textbf{AVeriTeC} benchmark \citep{schlichtkrull2023averitec}. Primary efficiency evaluations were conducted on a fixed, locked evaluation split, requiring evidence synthesis, veracity classification, and citation attribution.
-    \item \textbf{Splits:} (1) \textit{Primary Held-Out Test Split:} \texttt{retrieved-heldout300.jsonl} (300 complex long-context claims with retrieved web evidence, mean context $5,090.1$ tokens [std $4,944.5$, max $17,703$], frozen prior to benchmark execution; $57.7\%$ of claims exceed $10\text{k}$ evidence characters). (2) \textit{Auxiliary Oracle Split:} \texttt{oracle-heldout400.jsonl} (comprising 393 verified claims after filtering 7 incomplete instances from the 400 held-out oracle set; mean raw context $636.0$ tokens, packaging into $338.9$ mean draft prompt tokens). All primary comparisons were executed on this fixed held-out split, while subsequent selector ablations and retention studies were conducted on the same locked split as post-hoc analyses.
-    \item \textbf{Models \& Hardware:} Target: \texttt{Qwen/Qwen3-8B}; Drafter: \texttt{Qwen/Qwen3-0.6B}. Evaluated on NVIDIA RTX 5090 (32GB VRAM, PyTorch 2.13.0+cu130, Blackwell sm\_120). Parameters: $K=4$, $T=0.7$, top-$p=0.9$.
+    \item \textbf{Benchmarks \& Splits:} We evaluate across two knowledge-intensive long-context tasks: (1) \textbf{AVeriTeC} \citep{schlichtkrull2023averitec} (structured JSON claim synthesis, veracity classification, and citation attribution) on the locked test split \texttt{retrieved-heldout300.jsonl} ($N=300$, mean $5,090.1$ tokens [std $4,944.5$, max $17,703$], $57.7\%$ exceeding $10\text{k}$ evidence chars), its complete selective long-context subset \texttt{retrieved-heldout-long173.jsonl} ($N=173 > 10\text{k}$ chars), and the short-context auxiliary split \texttt{oracle-heldout400.jsonl} ($393$ verified claims, mean $636.0$ raw tokens / $338.9$ draft prompt tokens); and (2) \textbf{LongBench HotpotQA} \citep{bai2024longbench,yang2018hotpotqa} ($N=100$ multi-document QA examples, mean $14,083$ tokens, max $17,908$). Primary comparisons use the fixed held-out splits with Holm--Bonferroni correction ($p_{\text{Holm}}$) across multi-arm contrasts; dev hyperparameter ablations use $50$ disjoint training claims.
+    \item \textbf{Models \& Hardware:} Target: \texttt{Qwen/Qwen3-8B}; Drafter: \texttt{Qwen/Qwen3-0.6B} (plus \texttt{Qwen2.5-7B/0.5B-Instruct}). Evaluated on NVIDIA RTX 5090 (32GB VRAM, PyTorch 2.13.0+cu130, Blackwell sm\_120), $K=4$, $T=0.7$, top-$p=0.9$.
 \end{itemize}
 
 \subsection{Primary Results on Held-Out Evaluation}
 \label{sec:main_results}
-
-\input{generated_tables/table4_selector_ablation.tex}
-
-Table \ref{tab:main_results} presents the primary benchmark on 300 held-out long-context claims.
-
-\paragraph{Wall-Clock Acceleration:}
-SPADE achieves \textbf{43.28 tok/s} end-to-end throughput, outperforming target autoregression (\texttt{B0-S}, $35.35\text{ tok/s}$) by \textbf{+22.4\%} ($+7.93\text{ tok/s}$, 95\% CI $[+6.84, +9.12]$, $p < 10^{-4}$) and uncompressed speculative decoding (\texttt{Baseline Full}, $41.47\text{ tok/s}$) by \textbf{+4.4\%} ($+1.82\text{ tok/s}$, 95\% CI $[+1.39, +2.23]$, $p < 10^{-4}$). In decode phase, SPADE reaches \textbf{57.03 tok/s} (+32.4\% over target AR).
-
-\paragraph{Active KV Cache Reduction:}
-SPADE reduces active draft KV cache memory by \textbf{$-63.9\%$} ($566.9\text{ MB} \to 204.6\text{ MB}$, $p < 10^{-4}$) by compressing draft prompt tokens from $5,090.1 \to 1,776.8$ ($-65.1\%$). Peak GPU VRAM decreases from $22.57\text{ GB} \to 21.23\text{ GB}$.
-
-\paragraph{Empirical Acceptance Equivalence within Practical Margin:}
-SPADE achieves an evaluated acceptance of \textbf{78.20\%} ($3.114$ tokens/round), compared to $78.16\%$ for Baseline Full ($+0.04\text{ pp}$). Equivalence testing via two-one-sided-tests (TOST) within a practical $\pm 1.0\text{ pp}$ margin supports empirical equivalence: the 90\% CI of $[-0.35, +0.44]\text{ pp}$ falls strictly within bounds ($p_1 < 10^{-4}, p_2 < 10^{-4}$). We note that this analysis demonstrates empirical equivalence bounded by the selected $\pm 1.0\text{ pp}$ tolerance margin, rather than asserting identical proposal distributions.
+Table \ref{tab:main_results} summarizes end-to-end efficiency on 300 held-out AVeriTeC claims: SPADE reaches \textbf{43.28 tok/s} E2E (\textbf{57.03 tok/s} decode, $+32.4\%$ over AR), outperforming Target AR (\texttt{B0-S}, $35.35\text{ tok/s}$) by \textbf{+22.4\%} ($+7.93\text{ tok/s}$, 95\% CI $[+6.84, +9.12]$, $p_{\text{Holm}} < 10^{-4}$) and \texttt{Baseline Full} ($41.47\text{ tok/s}$) by \textbf{+4.4\%} ($+1.82\text{ tok/s}$, $[+1.39, +2.23]$, $p_{\text{Holm}} < 10^{-4}$). Active draft KV memory shrinks by \textbf{$-63.9\%$} ($566.9 \to 204.6\text{ MB}$, $p_{\text{Holm}} < 10^{-4}$) as draft prompt length drops $-65.1\%$ ($5,090.1 \to 1,776.8$ tok), cutting peak GPU VRAM ($22.57 \to 21.23\text{ GB}$). Candidate acceptance remains preserved at \textbf{78.20\%} ($3.114$ tok/round vs.\ $78.16\%$, $p_{\text{Holm}} = 0.8656$), with TOST ($\pm 1.0\text{ pp}$ margin, 90\% CI $[-0.35, +0.44]\text{ pp}$, $p_1, p_2 < 10^{-4}$) supporting empirical equivalence within margin.
 
 \input{generated_tables/table_stratified_performance.tex}
 
-\paragraph{Context-Stratified Acceleration \& Noise Floor Analysis:}
-A critical property of SPADE is its minimal-overhead bypass on short evidence ($\le 10\text{k}$ characters, comprising $42.3\%$ of the held-out split). Table \ref{tab:stratified_performance} presents a fine-grained breakdown across context strata, reporting both aggregate throughput ($\sum \text{tok} / \sum \text{time}$) and unweighted per-claim mean throughput, alongside candidate acceptance $\alpha_{\text{eval}}$ and proposal acceptance $\alpha_{\text{prop}}$.
+\paragraph{Context-Stratified Acceleration \& Noise Floor:}
+On high-throughput short contexts ($\approx 77\text{ tok/s}$, Section \ref{sec:oracle}), repeated interleaved runs exhibit a $\pm 4.07\text{ tok/s}$ ($\approx 5.3\%$) empirical variation, and identical sequential executions across 393 oracle claims (Table \ref{tab:oracle_results}) show a $+0.73\text{ tok/s}$ ($+0.95\%$, $p<10^{-4}$) thermal drift floor. Against this null control (Table \ref{tab:stratified_performance}), the short-context bypass cohort ($L \le 10\text{k}$ chars, $N=127$, $42.3\%$) shows $+0.19\text{ tok/s}$ ($[-0.37, +0.89]$, $p=0.29$), confirming parity. Real gains concentrate on selective long claims ($N=173$: $+5.4\%$ aggregate, $+1.57\text{ tok/s}$ per-claim $[+1.11, +2.03]$, $p < 10^{-4}$, $2.6\times$ the null-control drift) and dense claims ($N=124, \ge 20\text{k}$ chars: \textbf{+6.0\%} aggregate, $+1.75\text{ tok/s}$ per-claim $[+1.32, +2.18]$, \textbf{$-74.4\%$} draft KV), with acceptance preserved across all strata.
 
-To contextualize statistical significance against hardware variability, we evaluated the empirical noise floor across repeated interleaved trials. On high-throughput short contexts ($\approx 77\text{ tok/s}$, Section \ref{sec:oracle}), inter-batch GPU clock and thermal fluctuations introduce an empirical variation of $\pm 4.07\text{ tok/s}$ ($\approx 5.3\%$ relative). Furthermore, evaluating identical code paths in sequential batch execution on the 393 oracle claims (Table \ref{tab:oracle_results}) produces a small systematic drift of $+0.73\text{ tok/s}$ ($+0.95\%$, 95\% CI $[+0.34, +1.30]$, $p < 10^{-4}$), demonstrating that unadjusted cluster-bootstrap CIs can register inter-batch hardware drift. We therefore utilize Table \ref{tab:oracle_results} as an \textit{empirical null-control baseline}.
+\input{generated_tables/table_decisive_baselines.tex}
 
-Against this null-control baseline, the bypass cohort ($N=127$, Table \ref{tab:stratified_performance}) exhibits a per-claim difference of $+0.19\text{ tok/s}$ (95\% CI $[-0.37, +0.89]$, $p=0.29$), which is completely absorbed within the null-control floor, confirming exact behavioral parity. In sharp contrast, on the selective regime ($N=173$, $> 10\text{k}$ characters), SPADE achieves an aggregate gain of $+1.88\text{ tok/s}$ ($+5.4\%$, per-claim mean $+1.57\text{ tok/s}$, 95\% CI $[+1.11, +2.03]$, $p < 10^{-4}$), which is $2.6\times$ larger than the null-control drift. On dense multi-document claims ($N=124$, $\ge 20\text{k}$ characters), aggregate acceleration scales to \textbf{+6.0\%} ($+1.87\text{ tok/s}$, per-claim mean $+1.75\text{ tok/s}$, 95\% CI $[+1.32, +2.18]$), accompanied by a massive \textbf{$-74.4\%$ reduction} in active draft KV-cache memory. Across all strata, acceptance metrics remain preserved.
-
-\subsection{Additive Latency Decomposition}
+\subsection{Controlled Long-Context Baselines (\texorpdfstring{$N=173$}{N=173}) \& Latency Decomposition}
 \label{sec:latency_decomp}
-Table \ref{tab:additive_breakdown} reports the complete latency breakdown per generated token, satisfying $\sum \text{components} + \text{Residual} = \text{Total E2E}$ with exact additive closure ($0.000\text{ ms/tok}$ residual). SPADE reduces draft prefill latency from $0.974\text{ ms/tok} \to 0.353\text{ ms/tok}$ (a \textbf{$-63.8\%$ reduction}), directly mirroring its $-65.1\%$ draft token compression. Target attention hooking adds only \textbf{$0.163\text{ ms/tok}$} ($0.7\%$ of total latency). Additionally, shorter draft prompt KV caches lower draft decode latency from $4.790 \to 4.224\text{ ms/tok}$ ($-11.8\%$). In combination, net end-to-end latency drops from $24.116\text{ ms/tok} \to 23.104\text{ ms/tok}$ ($\Delta = -1.012\text{ ms/tok}$), delivering SPADE's $+4.4\%$ wall-clock acceleration over Baseline Full.
+Table \ref{tab:decisive_baselines} evaluates all 9 context policies on the complete selective cohort ($N=173$ claims $>10\text{k}$ chars) with Holm--Bonferroni correction. SPADE ($B=10\text{k}$) outperforms \texttt{Baseline Full} by $+1.64\text{ tok/s}$ ($36.76$ vs.\ $35.12\text{ tok/s}$, $p_{\text{Holm}} < 10^{-4}$) while cutting draft KV peak by $-68.5\%$ ($917.2 \to 289.0\text{ MB}$). At matched or tighter KV capacity, SnapKV-style token eviction (\texttt{KV-Sparse}) still pays full $8,275$-token draft prefill before eviction and drops acceptance ($74.61\%$ at $B=1,776$ slots, $68.74\%$ at $B=512$): SPADE ($B=10\text{k}$) exceeds \texttt{KV-Sparse (B=1,776)} by $+2.09\text{ tok/s}$ ($[+1.60, +2.61]$) and $+1.72\text{ pp}$ $\alpha_{\text{eval}}$ ($p_{\text{Holm}} < 10^{-4}$), while ultra-compact \texttt{SPADE B=2k} ($91.3\text{ MB}$ KV, $-90.0\%$) outperforms \texttt{KV-Sparse (B=512)} ($68.3\text{ MB}$) by $+3.49\text{ tok/s}$ ($[+2.95, +4.06]$) and $+4.98\text{ pp}$ acceptance ($p_{\text{Holm}} < 10^{-4}$). Training-free n-gram lookup (\texttt{PLD}) struggles on abstractive JSON synthesis ($\alpha_{\text{eval}} = 31.01\%$, $26.22\text{ tok/s}$), while \texttt{No Evidence (B=0)} ($67.00\%$) and \texttt{Sliding Window (B=8k)} ($70.59\%$) lose grounding. Across all 173 long claims, \texttt{BM25 Sent-B10k} ($36.55\text{ tok/s}$, $\alpha_{\text{eval}}=76.05\%$) performs statistically indistinguishably from SPADE ($+0.21\text{ tok/s}$ $[-0.33, +0.77]$, $p_{\text{Holm}}=0.444$).
+
+In the per-token latency decomposition over all 300 claims (Appendix Table \ref{tab:additive_breakdown}, $0.000\text{ ms/tok}$ residual), SPADE reduces draft prefill latency from $0.974 \to 0.353\text{ ms/tok}$ ($-63.8\%$) and draft decode latency from $4.790 \to 4.224\text{ ms/tok}$ ($-11.8\%$), while target hooking adds $0.163\text{ ms/tok}$ ($0.7\%$ of E2E latency), yielding a net $-1.012\text{ ms/tok}$ reduction ($24.116 \to 23.104\text{ ms/tok}$).
 
 \subsection{Oracle Benchmark \& Minimal-Bypass Null Control}
 \label{sec:oracle}
-On 393 short-context oracle claims (Appendix Table \ref{tab:oracle_results}), total evidence length falls below $B=10\text{k}$. SPADE's bypass engages on 100\% of claims, setting $C_{\text{draft}} = C_{\text{full}}$ and executing identically to Baseline Full. Under multi-seed evaluation, SPADE achieves empirical acceptance parity ($81.33\%$ vs $81.33\%$, $\Delta = 0.00\text{ pp}$, $p = 1.0000$). Measured throughput is $77.61\text{ tok/s}$ vs $76.88\text{ tok/s}$ ($\Delta = +0.73\text{ tok/s}$, $+0.95\%$). Because the executed code paths are identical, this $+0.73\text{ tok/s}$ serves as an empirical null-control floor for inter-run hardware thermal drift. Direct microbenchmarks confirm that the bypass check itself incurs only $2.45\,\mu\text{s}$ per claim ($< 0.003\text{ ms}$).
-
-\begin{table}[t]
-\centering
-\small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccc}
-\toprule
-\textbf{Veracity Class} & \textbf{Gold} & \textbf{B0-S (AR)} & \textbf{Baseline Full} & \textbf{SPADE (Ours)} \\
-\midrule
-Refuted & 189 & 17 & 18 & 20 \\
-Supported & 76 & 16 & 12 & 11 \\
-Not Enough Evidence & 20 & 245 & 249 & 250 \\
-Conflicting Evidence & 15 & 22 & 21 & 19 \\
-\midrule
-\textbf{Macro-F1} & — & \textbf{0.1267} & \textbf{0.1254} & \textbf{0.1222} \\
-\bottomrule
-\end{tabular}%
-}
-\caption{\textbf{Verdict Classification Distribution across 300 Claims:} All methods achieve 100\% JSON validity and 100\% citation attribution fidelity.}
-\label{tab:verdict_distribution}
-\end{table}
+On 393 short-context oracle claims ($< B=10\text{k}$, Appendix Table \ref{tab:oracle_results}), SPADE bypasses selection ($C_{\text{draft}} = C_{\text{full}}$, $2.45\,\mu\text{s}$/claim), achieving acceptance parity ($81.33\%$ vs.\ $81.33\%$, $p=1.0000$) and $+0.73\text{ tok/s}$ ($77.61$ vs.\ $76.88$, $+0.95\%$) null-control thermal drift.
 
 \begin{table}[t]
 \centering
@@ -249,46 +215,50 @@ Conflicting Evidence & 15 & 22 & 21 & 19 \\
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{llcccc}
 \toprule
-\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Draft KV} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{E2E tok/s} & \textbf{Speedup vs.\ AR} \\
+\textbf{Method} & \textbf{Context} & \textbf{Draft KV} & \textbf{$\alpha_{\text{eval}}$} & \textbf{E2E tok/s} & \textbf{vs.\ AR} \\
 \midrule
-\textbf{B0-S (Target AR)} & Full (Target Only) & — & — & 46.27 & — \\
+\textbf{B0-S (AR)} & Full Target & — & — & 46.27 & — \\
 \textbf{Baseline Full} & Full $\to$ Full & 61.0 MB & 74.59\% & 48.56 & +4.9\% \\
 \textbf{BM25 Top-2} & Full $\to$ Top-2 & 27.5 MB & 72.79\% & 50.73 & +9.6\% \\
-\textbf{BM25 Sent-B10k} & Full $\to$ Sent B=10k & 20.7 MB & 73.61\% & 52.07 & +12.5\% \\
-\textbf{SPADE (Ours)} & Full $\to$ Attn B=10k & \textbf{22.1 MB} & \textbf{73.98\%} & \textbf{51.67} & \textbf{+11.7\%$^*$} \\
+\textbf{BM25 Sent-B10k} & Full $\to$ B=10k & 20.7 MB & 73.61\% & 52.07 & +12.5\% \\
+\textbf{SPADE (Ours)} & Full $\to$ Attn & \textbf{22.1 MB} & \textbf{73.98\%} & \textbf{51.67} & \textbf{+11.7\%$^*$} \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Cross-Model Generalization (Qwen2.5-7B/0.5B, 300 claims):} SPADE delivers $+11.7\%$ speedup over Target AR ($p < 10^{-4}$) and $-63.8\%$ KV cache reduction. Full 11-metric matrix is in Appendix Table \ref{tab:qwen25_generalization_full}.}
+\caption{\textbf{Qwen2.5-7B/0.5B (300 claims):} $+11.7\%$ vs.\ AR ($p<10^{-4}$), $-63.8\%$ KV (full matrix: Appendix Table \ref{tab:qwen25_generalization_full}).}
 \label{tab:qwen25_generalization}
 \end{table}
 
 \subsection{Downstream Fact-Checking Veracity \& Distribution Preservation}
 \label{sec:veracity}
-We emphasize that this investigation evaluates speculative decoding inference acceleration and distribution preservation rather than claiming state-of-the-art fact-checking accuracy. Table \ref{tab:verdict_distribution} reports veracity classification across 300 held-out claims as an empirical sanity check. The modest Macro-F1 reflects domain transfer challenges of zero-shot instruction-tuned LLMs on AVeriTeC (predominantly defaulting to \textit{Not Enough Evidence}). Crucially, no statistically significant difference in Macro-F1 was detected between decoding configurations ($0.1222$ for SPADE vs.\ $0.1254$ for Baseline Full vs.\ $0.1267$ for Target AR; paired bootstrap $p > 0.85$), with all methods achieving 100\% JSON schema validity and 100\% citation format validity.
+We emphasize that this investigation evaluates speculative decoding inference acceleration and distribution preservation rather than claiming state-of-the-art fact-checking accuracy. Full class counts across 300 held-out claims appear in Appendix Table \ref{tab:verdict_distribution}; modest Macro-F1 reflects zero-shot instruction-tuned domain transfer on AVeriTeC. Crucially, no statistically significant difference in Macro-F1 was detected between decoding configurations ($0.1222$ for SPADE vs.\ $0.1254$ for Baseline Full vs.\ $0.1267$ for Target AR; paired bootstrap $p > 0.85$), with all methods achieving 100\% JSON schema validity and citation attribution validity.
 
-To directly validate Theorem \ref{thm:invariance} (Target Distribution Invariance) beyond classification labels, we audited text distributions across all 300 claims under stochastic sampling ($T=0.7$, top-$p=0.9$). Generated token lengths are identical: Target AR yields $94.5$ mean tokens ($\sigma = 30.7$), Baseline Full yields $94.5$ ($\sigma = 32.8$), and SPADE yields $95.2$ ($\sigma = 32.6$). The 1-gram vocabulary total variation distance between SPADE and Target AR is $\text{TV} = 0.1030$ (comparable to Baseline Full vs.\ AR: $\text{TV} = 0.1040$), reflecting standard rollout stochasticity. Exact verdict agreement between SPADE and Target AR reaches $92.00\%$ ($95.67\%$ vs.\ Baseline Full), confirming that selective drafting introduces no measurable distribution distortion.
+To validate Theorem \ref{thm:invariance} (Target Distribution Invariance) empirically, we conducted two complementary audits. First, we compared generated outputs across all 300 claims ($T=0.7$, top-$p=0.9$) against an independent Target AR run (\texttt{seed=43}) capturing natural seed-to-seed rollout noise: \texttt{AR (s42) vs.\ AR (s43)} yields mean token lengths $94.5 \pm 30.7$ vs.\ $94.8 \pm 31.5$, corpus 1-gram $\text{TV} = 0.1050$ (95\% jackknife CI $[0.0970, 0.1129]$), and verdict agreement $92.67\%$ (Wilson 95\% CI $[89.15\%, 95.11\%]$). \texttt{Baseline Full vs.\ AR} ($94.5 \pm 32.8$ tokens, $\text{TV} = 0.1040$ $[0.0963, 0.1116]$, agreement $93.33\%$ $[89.93\%, 95.64\%]$) and \texttt{SPADE vs.\ AR} ($95.2 \pm 32.6$ tokens, $\text{TV} = 0.1030$ $[0.0944, 0.1116]$, agreement $92.00\%$ $[88.37\%, 94.57\%]$; paired agreement diff vs.\ Full-SD $-1.33\text{ pp}$, 95\% CI $[-3.33, +0.67]$, $p = 0.2612$) remain indistinguishable from natural AR seed noise (while \texttt{SPADE vs.\ Full-SD} reaches $95.67\%$ agreement, $\text{TV} = 0.0786$ $[0.0707, 0.0865]$). Second, a direct teacher-forced prefix audit across $2,843$ prefixes (25 long claims) measures analytical 1-step residual $\text{TV}(P_{\text{SPADE}}, P_{\text{target}})$ of $1.98 \times 10^{-9}$ mean ($4.47 \times 10^{-8}$ max; mean $\text{KL} = 5.23 \times 10^{-10}$); on $50$ worst-case prefixes ($\text{TV}(p,q)=1.0$) with $10,000$ Monte Carlo draws each, empirical residual $\text{TV}$ ($0.00198$) matches an AR-vs-AR finite-sample null ($0.00208$; $82.4\%$ Pearson $\chi^2$ pass rate at $\alpha=0.05$, $\min p = 0.0178$), and live \texttt{exact\_speculative\_round} verification across $10$ high-TV prefixes ($2,000$ draws) achieves mean $\text{TV} = 0.0008$.
 
-\subsection{Cross-Model Version Generalization}
+\input{generated_tables/table_longbench_hotpot.tex}
+
+\subsection{Cross-Model \& Second-Benchmark Generalization}
 \label{sec:qwen25_generalization}
-To evaluate structural generalizability across model generations, we benchmarked \texttt{Qwen/Qwen2.5-7B-Instruct} (target) paired with \texttt{Qwen/Qwen2.5-0.5B-Instruct} (drafter) across all 300 held-out claims (Table \ref{tab:qwen25_generalization}).
-SPADE achieves \textbf{51.67 tok/s} (+11.7\% vs AR, $p < 10^{-4}$; +6.4\% vs Baseline Full, $p < 10^{-4}$), while cutting draft KV cache by \textbf{$-63.8\%$} ($61.0 \to 22.1\text{ MB}$).
+To evaluate generalization across model families and tasks, we tested \texttt{Qwen2.5-7B/0.5B-Instruct} on AVeriTeC (Table \ref{tab:qwen25_generalization}) and \texttt{Qwen3-8B/0.6B} on \textbf{LongBench HotpotQA} ($N=100$, mean $14,083$ tokens, Table \ref{tab:longbench_hotpot}). On \texttt{Qwen2.5}, SPADE reaches \textbf{51.67 tok/s} ($+11.7\%$ vs.\ AR, $+6.4\%$ vs.\ Baseline Full, $p < 10^{-4}$) while cutting draft KV by $-63.8\%$ ($61.0 \to 22.1\text{ MB}$). On \textbf{HotpotQA}, SPADE ($B=10\text{k}$) reduces draft KV by \textbf{$-79.7\%$} ($1,548.9 \to 313.8\text{ MB}$), preserves acceptance ($74.04\%$ vs.\ $75.04\%$), and outperforms \texttt{Baseline Full} ($+1.37\text{ tok/s}$, 95\% CI $[+0.72, +1.98]$), \texttt{KV-Sparse (B=1,776)} ($+2.05\text{ tok/s}$, $+4.36\text{ pp}$ $\alpha_{\text{eval}}$), and \texttt{Prompt-Lookup (PLD)} ($+4.00\text{ tok/s}$, $+30.01\text{ pp}$, all $p_{\text{Holm}} < 10^{-4}$). Consistent with our 16k scaling crossover (Appendix Table \ref{tab:long_context_scaling}), plain Target AR ($23.68\text{ tok/s}$) outpaces all full-target speculative arms at $14\text{k}$ mean length ($-1.81\text{ tok/s}$ for SPADE, $p_{\text{Holm}} < 10^{-4}$), while SPADE halves the speculative deficit relative to Target AR ($-13.4\% \to -7.6\%$). Downstream QA F1 and Sub-EM show no statistically significant difference ($54.4/68.0\%$ for SPADE vs.\ $54.5/66.0\%$ Full-SD, $p_{\text{Holm}}=0.953$; vs.\ $58.6/70.0\%$ Target AR, $p_{\text{Holm}}=0.127$).
 
-\paragraph{Comparative Analysis vs.\ Lexical Selection:}
-On Qwen2.5, lexical sentence selection (\texttt{BM25 Sent-B10k}) achieves $52.07\text{ tok/s}$, edging past SPADE by $0.40\text{ tok/s}$ ($0.77\%$), well within typical hardware noise. Lexical budgeting offers an effective zero-GPU-overhead baseline for keyword-dense queries, while attention selection retains higher resilience on dense multi-passage claims ($47.89\%$ vs $44.15\%$, $+3.74\text{ pp}$ over BM25 Top-2).
+\paragraph{Candid Positioning vs.\ Lexical Selection (\texttt{BM25 Sent-B10k}):}
+Across all four evaluation suites, zero-GPU lexical sentence budgeting (\texttt{BM25 Sent-B10k}) achieves wall-clock throughput statistically indistinguishable from or within hardware noise of SPADE: $+0.63\text{ tok/s}$ ($p_{\text{Holm}}=0.041$, within the $+0.73\text{ tok/s}$ drift floor) on Qwen3 AVeriTeC, $-0.40\text{ tok/s}$ ($0.77\%$) on Qwen2.5, $+0.21\text{ tok/s}$ ($p_{\text{Holm}}=0.444$) on Long-173, and $+0.11\text{ tok/s}$ ($p_{\text{Holm}}=0.690$) on HotpotQA. Thus, when CPU latency and keyword overlap are favorable, \texttt{BM25 Sent-B10k} is a strong zero-GPU baseline. Attention-guided selection complements it by tracking model-internal relevance without relying on surface word overlap---improving candidate acceptance by $+0.96\text{ pp}$ on AVeriTeC ($p_{\text{Holm}}=0.0066$), $+1.43\text{ pp}$ on HotpotQA ($p_{\text{Holm}}=0.078$), and $+3.74\text{ pp}$ over \texttt{BM25 Top-2} on dense Qwen2.5 claims (see Appendix \ref{app:reference_baselines} qualitative cases).
 
 \section{Discussion \& Analysis}
 \label{sec:discussion}
 
-\subsection{Selection Strategy \& Coverage Ablation}
+\subsection{Selection Strategy, Dev Ablations \& Coverage Audit}
 \label{sec:ablation_analysis}
-Table \ref{tab:selector_ablation} compares four budget-matched ($B=10\text{k}$) selection policies on 300 held-out claims.
+Appendix Table \ref{tab:selector_ablation} compares budget-matched ($B=10\text{k}$) selection policies on 300 held-out claims with Holm--Bonferroni family-wise error correction across all 5 selector comparisons.
 
 \paragraph{Attention Guidance vs.\ Lexical and Random Selection:}
-SPADE's attention-guided selection achieves \textbf{78.20\%} acceptance, significantly outperforming Random Selection ($76.50\%$, $+1.70\text{ pp}$, $p = 0.0002$) and BM25 sentence selection ($77.24\%$, $+0.96\text{ pp}$, $p = 0.0162$).
+SPADE achieves \textbf{78.20\%} acceptance, outperforming Random Selection ($76.50\%$, $+1.70\text{ pp}$, $p_{\text{Holm}} < 10^{-4}$; $+0.93\text{ tok/s}$, $p_{\text{Holm}} = 0.0042$) and BM25 sentence selection ($77.24\%$, $+0.96\text{ pp}$, $p_{\text{Holm}} = 0.0066$; $+0.63\text{ tok/s}$, $p_{\text{Holm}} = 0.0412$). We note that while SPADE yields higher acceptance than BM25 sentence selection, the $+0.63\text{ tok/s}$ E2E throughput gap sits near our $+0.73\text{ tok/s}$ oracle hardware drift floor.
 
-\paragraph{The Structural Recall Role of Passage Coverage:}
-Comparing SPADE with and without mandatory passage coverage reveals that enforcing coverage slightly improves acceptance ($78.20\%$ vs $78.14\%$, $+0.06\text{ pp}$) with wall-clock throughput essentially matching unconstrained attention selection ($43.28$ vs $43.33\text{ tok/s}$, $\Delta = -0.05\text{ tok/s}$, 95\% CI $[-0.24, +0.18]$). Its primary benefit is \textit{structural recall safety}: guaranteeing that at least one salient sentence from every retrieved passage is preserved in $C_{\text{draft}}$. Evaluating cited passage retention demonstrates a marked difference: coarse document pruning (\texttt{BM25 Top-2}) omits $37.7\%$ of cited passages (retaining only 195/313), whereas SPADE retains \textbf{100.0\% of cited passages} (354/354), reflecting internal context-citation consistency under stochastic sampling ($T=0.7$). Furthermore, measuring non-stopword token overlap between target justifications and retained draft sentences confirms a $91.3\%$ lexical content-word coverage rate (Appendix \ref{app:provenance}).
+\paragraph{Disjoint Dev-Split Selector Ablations:}
+To validate scoring and hook hyperparameters off the held-out split, Appendix Table \ref{tab:dev_selector_ablation} evaluates expected acceptance $\mathbb{E}[1-\text{TV}(p,q)]$ on $5,391$ prefixes across 50 disjoint development claims. Raw summation (\texttt{sum}, $76.27\%$) closely matches length-normalized variants (\texttt{sqrt}: $76.34\%$, $+0.07\text{ pp}$; \texttt{mean}: $76.24\%$), terminal window sensitivity saturates by $W=8$--$16$, and upper layers (\texttt{upper25} $76.39\%$, \texttt{upper50} $76.27\%$) outperform all-layer averaging ($75.42\%$) or last-layer scoring ($74.31\%$).
+
+\paragraph{Structural Recall Role of Passage Coverage:}
+Comparing SPADE with and without the per-passage coverage constraint shows similar aggregate acceptance ($78.20\%$ vs.\ $78.14\%$, $p_{\text{Holm}} = 0.3748$) and throughput ($43.28$ vs.\ $43.33\text{ tok/s}$, $p_{\text{Holm}} = 0.3310$). As detailed in Appendix Table \ref{tab:selector_coverage_all}, its purpose is structural recall safety: coarse document pruning (\texttt{BM25 Top-2}) retains only $60.8\%$ passage coverage and $61.8\%$ ($199/322$) of shared Target AR cited passages, whereas all $B=10\text{k}$ sentence selectors maintain $100.0\%$ ($322/322$) shared-AR citation retention (vs.\ $99.69\%$ for \texttt{SPADE No-Coverage}). Measured across all selectors under a unified protocol, non-stopword lexical recall against own/shared-AR justifications is $81.27\%/80.97\%$ for SPADE, $84.52\%/83.81\%$ for \texttt{BM25 Sent-B10k}, and $77.99\%/78.03\%$ for \texttt{Random Sent-B10k} (qualitative examples in Appendix \ref{app:reference_baselines}).
 
 \subsection{The Negative Result: Failure of Logit Biasing}
 \label{sec:negative_result}
@@ -296,17 +266,20 @@ Prior speculative decoding research hypothesized that boosting draft logits on e
 
 \section{Conclusion}
 \label{sec:conclusion}
-We presented \textbf{SPADE}, an exact, evidence-selective speculative decoding framework for knowledge-intensive generation. By decoupling the target model's full verification context from the draft model's compact sentence-budgeted context, SPADE addresses draft KV-cache bloat and passage-pruning divergence. SPADE extracts target-prefill attention weights with zero auxiliary forward passes and enforces mandatory passage coverage. Across 300 held-out claims and two model generations (\texttt{Qwen3} and \texttt{Qwen2.5}), SPADE delivers a $+22.4\%$ speedup over target AR and $+4.4\%$ over full speculative decoding while reducing draft KV cache by $-63.9\%$, all while preserving exact target distribution invariance. Reference baselines, budget trade-offs ($B=2\text{k}\text{ vs }10\text{k}$), and long-sequence prefill scaling are provided in Appendix \ref{app:reference_baselines}.
+We presented \textbf{SPADE}, a distribution-preserving, evidence-selective speculative decoding framework for knowledge-intensive generation. By decoupling full-context target verification from compact, attention-selected draft context under a per-passage coverage constraint ($m/m$), SPADE reduces draft KV cache by $-63.9\%$ on AVeriTeC and $-79.7\%$ on LongBench HotpotQA while preserving target output distributions under both seed-noise and teacher-forced audits. On selective long contexts ($N=173$) and HotpotQA ($N=100$), SPADE consistently outperforms full-context speculative decoding, SnapKV-style \texttt{KV-Sparse}, and Prompt-Lookup (\texttt{PLD}) while revealing both lexical parity in wall-clock throughput on keyword-dense queries and target-side KV dominance beyond $14\text{k}$--$16\text{k}$ tokens, motivating future integration with target-side KV sparsity (Appendix \ref{app:reference_baselines}).
 
 \section*{Limitations}
 \paragraph{Hardware Configuration:}
-Our primary empirical benchmarks were conducted on an NVIDIA RTX 5090 (32GB VRAM). While the relative memory reductions ($-63.9\%$ draft KV cache) and mathematical distribution invariance are hardware-agnostic, absolute wall-clock throughput will vary across GPU microarchitectures and tensor parallelism setups.
+Our primary empirical benchmarks were conducted on an NVIDIA RTX 5090 (32GB VRAM). While relative draft memory reductions and mathematical distribution invariance are hardware-agnostic, absolute wall-clock throughput varies across GPU microarchitectures and tensor parallelism setups.
+
+\paragraph{Target-Side Prefill and KV Bandwidth Dominance at 16k--32k:}
+As quantified in Appendix \ref{app:reference_baselines} (Table \ref{tab:long_context_scaling}), SPADE eliminates draft-side KV-cache and prefill scaling (holding draft prefill flat at $21.6\text{ ms}$), reduces peak co-located VRAM by $2.82\text{ GB}$ at $16\text{k}$ tokens ($20.92$ vs.\ $23.74\text{ GB}$), and continues executing at $32\text{k}$ tokens ($24.87\text{ GB}$) where full-context speculative decoding triggers CUDA out-of-memory on a 32\,GB GPU. However, because the target verifier continues to process the full uncompressed prompt to preserve Theorem \ref{thm:invariance}, target prefill ($1.69\text{ s} \to 4.18\text{ s}$) and full-target KV verification traffic dominate total latency at $16\text{k}$--$32\text{k}$ tokens, causing both full-context speculative decoding and SPADE to trail plain target autoregression ($22.06$ vs.\ $25.85\text{ tok/s}$ at $16\text{k}$; $11.29$ vs.\ $14.93\text{ tok/s}$ at $32\text{k}$) unless combined with orthogonal target-side sparse KV techniques (e.g., TriForce/MagicDec).
 
 \paragraph{Static Character Budget:}
-SPADE currently employs a calibrated static character budget ($B = 10\text{k}$ characters). While our minimal-overhead bypass handles short contexts, future work could investigate dynamic budget allocation conditioned on input entropy.
+SPADE currently employs a calibrated static character budget ($B = 10\text{k}$ or $B = 2\text{k}$ characters). While our minimal-overhead bypass handles short contexts, future work could investigate dynamic budget allocation conditioned on input entropy.
 
 \paragraph{Task Scope \& Downstream Performance:}
-Evaluations used AVeriTeC as a systematic, real-world long-context testbed for inference acceleration. Because zero-shot instruction-tuned LLMs achieve modest veracity Macro-F1 ($\approx 0.12$), downstream metrics verify distribution invariance rather than state-of-the-art fact-checking performance. Evaluating SPADE with fine-tuned verifiers across broader RAG and multi-turn conversational domains remains promising future work.
+Our primary experiments evaluate fact-checking summary synthesis on AVeriTeC and multi-document QA on LongBench HotpotQA. Because zero-shot instruction-tuned LLMs achieve modest AVeriTeC veracity Macro-F1 ($\approx 0.12$), downstream metrics verify distribution invariance rather than state-of-the-art classification accuracy. Extending evaluation to fine-tuned domain verifiers and multi-turn agentic RAG remains promising future work.
 
 \section*{Ethics Statement}
 This work introduces an algorithmic acceleration framework that is designed to preserve the target model output distribution of pre-trained language models via residual verification. SPADE does not generate novel risks or biases beyond those inherent in the underlying foundation models. All evaluations utilized publicly available, anonymized benchmark datasets.
@@ -328,6 +301,9 @@ This work introduces an algorithmic acceleration framework that is designed to p
     \item \textbf{Compilation:} Static CUDA graphs via \texttt{torch.compile(mode="reduce-overhead")}, PyTorch \texttt{FlexAttention}.
 \end{itemize}
 
+\paragraph{Attention Hook Exactness Validation:}
+Because SPADE computes upper-layer query-key softmax directly from captured $W=16$ tail hidden states and cached keys (accounting for \texttt{q\_proj}, per-head RMS QK-Norm when present, RoPE rotation, GQA broadcasting, causal masking, and FP32 softmax), we validated numerical agreement against PyTorch eager \texttt{output\_attentions=True} across 512--2,048 token prompts: on \texttt{Qwen3-0.6B} (FP32, 3 prompts) mean/worst max absolute error is $4.19\times 10^{-8} / 5.96\times 10^{-8}$ (Pearson $r = 1.0000$, $\min$ Spearman $\rho = 1.0000$, top-64 overlap $1.000$); on \texttt{Qwen3-8B} (BF16, 5 prompts) mean/worst max absolute error is $1.27\times 10^{-3} / 3.00\times 10^{-3}$ (mean abs error $5.91\times 10^{-6}$, $r = 0.99999$, $\min \rho = 0.9998$, top-64 overlap $99.1\%$); on \texttt{Qwen2.5-7B-Instruct} (BF16, 5 prompts) mean $r = 0.9993$, $\min \rho = 0.9420$, top-64 overlap $88.4\%$.
+
 \section{Benchmark Provenance \& Evaluation Methodology}
 \label{app:provenance}
 
@@ -339,13 +315,38 @@ All paired comparisons were computed using $B = 10,000$ bootstrap iterations res
     \item Qwen2.5 Held-Out: \nolinkurl{p2_qwen25_heldout300/b1_3_live_report.json}
 \end{itemize}
 (All raw reports stored under \nolinkurl{outputs/analysis/}).
-Table \ref{tab:oracle_results} reports the complete evaluation on 393 auxiliary short-context oracle claims, demonstrating exact empirical parity for SPADE's minimal-overhead bypass ($p = 1.0000$). Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model generalization on Qwen2.5-7B/0.5B across all 300 held-out claims.
+Table \ref{tab:oracle_results} reports the complete evaluation on 393 auxiliary short-context oracle claims, demonstrating empirical parity for SPADE's minimal-overhead bypass ($p = 1.0000$ for acceptance $\alpha$). Table \ref{tab:qwen25_generalization_full} reports the comprehensive 11-metric matrix for cross-model generalization on Qwen2.5-7B/0.5B across all 300 held-out claims. Table \ref{tab:verdict_distribution} reports the full veracity class breakdown on AVeriTeC (paired bootstrap $p > 0.85$ on Macro-F1).
 
-\subsection{Lexical Content Coverage Protocol}
-To evaluate sentence-level evidence retention without relying on passage headers alone, we measured non-stopword lexical content coverage. Target reasoning justifications and retained draft evidence sentences are lowercased and tokenized using regex word boundaries. Punctuation and standard NLTK English stopwords are filtered out. We then compute the set-based token recall of justification content words present in $C_{\text{draft}}$. Across all 300 held-out claims, SPADE achieves a mean non-stopword lexical coverage of $91.3\%$.
+\begin{table}[ht]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Veracity Class} & \textbf{Gold} & \textbf{B0-S (AR)} & \textbf{Baseline Full} & \textbf{SPADE (Ours)} \\
+\midrule
+Refuted & 189 & 17 & 18 & 20 \\
+Supported & 76 & 16 & 12 & 11 \\
+Not Enough Evidence & 20 & 245 & 249 & 250 \\
+Conflicting Evidence & 15 & 22 & 21 & 19 \\
+\midrule
+\textbf{Macro-F1} & — & \textbf{0.1267} & \textbf{0.1254} & \textbf{0.1222} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Verdict Classification Distribution across 300 Claims:} All methods achieve 100\% JSON validity and 100\% citation attribution fidelity.}
+\label{tab:verdict_distribution}
+\end{table}
+
+\input{generated_tables/table4_selector_ablation.tex}
+\input{generated_tables/table_selector_coverage_all.tex}
+
+\subsection{Passage Coverage, Citation Retention \& Lexical Content Protocol}
+To evaluate sentence-level evidence retention uniformly across selectors without relying on passage headers alone, we measured passage coverage, cited-passage retention against both each run's own citations and a shared reference trajectory (\texttt{Target AR}, 322 cited passages across all 300 claims), and non-stopword lexical content recall. Target summaries and retained draft evidence sentences are lowercased, word-tokenized, and filtered using standard English stopwords. As shown in Table \ref{tab:selector_coverage_all}, coarse document pruning (\texttt{BM25 Top-2}) retains only $60.8\%$ passage coverage and $61.8\%$ ($199/322$) of shared Target AR citations, whereas all three $B=10\text{k}$ sentence selectors satisfy $100.0\%$ passage coverage and $100.0\%$ ($322/322$) shared-AR cited-passage retention. Dropping the per-passage constraint (\texttt{SPADE No-Coverage}) reduces shared-AR cited retention slightly to $99.69\%$ ($321/322$, $99.67\%$ passage coverage). Non-stopword lexical recall against own / shared-AR justifications is $81.27\% / 80.97\%$ for SPADE ($75.80\%$ vs.\ gold justifications), $84.52\% / 83.81\%$ for \texttt{BM25 Sent-B10k} ($77.59\%$ vs.\ gold), and $77.99\% / 78.03\%$ for \texttt{Random Sent-B10k} ($72.33\%$ vs.\ gold).
 
 \section{Systems Engineering: StaticCache Rollback \& Numerical Validation}
 \label{app:systems}
+\input{generated_tables/table2_latency_decomp.tex}
 In standard Hugging Face implementations, speculative verification appends $K$ tokens. When candidate $k^*$ is rejected, truncating the KV cache requires tensor slicing or cache reallocation. In SPADE, we maintain a persistent cache pointer and decrement it in-place upon rejection, maintaining static tensor shapes compatible with \texttt{torch.compile(mode="reduce-overhead")}.
 
 \begin{table}[ht]
@@ -397,17 +398,19 @@ $\beta_0 = 2.00$ & 82.90\% & -0.31 pp & $[-0.52, -0.10]$ & 33.8 $\mu$s \\
 \label{tab:direction_a_polarity}
 \end{table}
 
-\section{Reference Baselines, Context Sweeps, and Draft Scaling}
+\section{Reference Baselines, Dev Ablations, Scaling, and Case Studies}
 \label{app:reference_baselines}
-\input{generated_tables/table_decisive_baselines.tex}
-To examine whether draft models require grounded evidence, we evaluated a zero-evidence ablation ($B=0$, Table \ref{tab:decisive_baselines}) alongside uncompressed Baseline Full and lexical BM25 on a controlled multi-document sub-cohort ($N=20$ claims). Stripping retrieved evidence from the drafter causes proposal acceptance $\alpha_{\text{prop}}$ to drop by $-11.88\text{ pp}$ ($54.45\% \to 42.57\%$, $\alpha_{\text{eval}}$ from $78.55\% \to 70.55\%$) and reduces decode throughput by $-7.52\text{ tok/s}$ ($59.71 \to 52.19\text{ tok/s}$), demonstrating that grounded evidence context is important for candidate proposal quality in multi-document tasks. Similarly, an attention-sink sliding window baseline ($8\text{k}$ characters trailing context) drops proposal acceptance by $-7.30\text{ pp}$ ($47.15\%$) by omitting salient evidence located in earlier passages.
-
-\paragraph{Budget Sweeps and the KV--Throughput Trade-off ($B \in [1\text{k}, 16\text{k}]$):}
-Sweeping the character budget across $\{1\text{k}, 2\text{k}, 4\text{k}, 8\text{k}, 10\text{k}, 16\text{k}\}$ reveals a broad throughput plateau: performance stabilizes between $B=2\text{k}$ and $B=16\text{k}$ ($44.02\text{--}44.32\text{ tok/s}$). In this sub-cohort, lexical selection (\texttt{BM25 Sent-B10k}) achieves $44.48\text{ tok/s}$, slightly higher than SPADE ($44.32\text{ tok/s}$, $\Delta = -0.16\text{ tok/s}$), while SPADE delivers higher proposal acceptance ($\alpha_{\text{eval}} = 78.55\%$ vs $77.50\%$). On the full 300 claims (Table \ref{tab:main_results}), SPADE reaches $43.28\text{ tok/s}$ vs BM25's $42.65\text{ tok/s}$. Crucially, setting $B=2\text{k}$ achieves $44.12\text{ tok/s}$ while requiring only $68.3\text{ MB}$ draft KV cache (a \textbf{$-65.2\%$ memory reduction} relative to $B=10\text{k}$), demonstrating that aggressive context budgets provide viable memory-constrained operating points with negligible throughput penalty.
-
+\input{generated_tables/table_dev_selector_ablation.tex}
 \input{generated_tables/table_long_context_scaling.tex}
-\paragraph{Draft Prefill Latency and Memory Scaling up to 32k Tokens:}
-Table \ref{tab:long_context_scaling} benchmarks draft model prefill latency and peak GPU memory across sequence lengths up to $32,768$ tokens on an NVIDIA RTX 5090 using PyTorch native SDPA. Under uncompressed speculative decoding, draft prefill latency scales from $27.35\text{ ms}$ at $2\text{k}$ to $941.31\text{ ms}$ at $32\text{k}$ tokens, with draft memory reaching $20.36\text{ GB}$. By decoupling draft context via fixed-budget sentence selection, SPADE bounds draft prompt length, keeping draft prefill latency flat at $\approx 25.2\text{ ms}$ and draft peak memory at $2.1\text{ GB}$. (We note that target model prefill continues to process the full prompt context; SPADE specifically mitigates draft model prefill and KV-cache expansion).
+
+\paragraph{Disjoint Dev-Split Selector \& Hyperparameter Ablation ($N=50$ Long Claims):}
+To validate design choices strictly off the test split, Table \ref{tab:dev_selector_ablation} evaluates expected acceptance $\mathbb{E}[1-\text{TV}(p,q)]$ across $5,391$ teacher-forced prefixes on 50 disjoint long development claims (zero overlap with \texttt{retrieved-heldout300.jsonl}). Default attention summation (\texttt{sum}, $76.27\%$) closely matches normalized variants (\texttt{sqrt}: $76.34\%$, $+0.07\text{ pp}$; \texttt{mean}: $76.24\%$; \texttt{max}: $76.19\%$), showing insensitivity to length normalization. Terminal query window sizes plateau by $W=8\text{--}16$ ($W=1$: $75.24\%$, $W=4$: $76.04\%$, $W=8$: $76.15\%$, $W=16/32$: $76.27\%$). Focusing on upper layers (\texttt{upper25}: $76.39\%$, \texttt{upper50}: $76.27\%$, \texttt{middle50}: $76.20\%$) clearly outperforms averaging all layers ($75.42\%$) or relying on the final layer alone ($74.31\%$). Sweeping $B \in [1\text{k}, 16\text{k}]$ demonstrates smooth trade-offs from $70.86\%$ ($1\text{k}$) to $72.17\%$ ($2\text{k}$) and $75.99\%\text{--}76.59\%$ ($8\text{k}\text{--}16\text{k}$).
+
+\paragraph{End-to-End Sequence Scaling and Target-Side Dominance up to 32k Tokens:}
+Table \ref{tab:long_context_scaling} benchmarks prefill latency, attention hook overhead, end-to-end throughput (128 generated tokens, 3 prompts per length after warmup), and peak co-located VRAM across $2\text{k}$--$32\text{k}$ tokens on an RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}). SPADE keeps draft prefill flat at $21.58\text{ ms}$ ($1.38\text{ GB}$ standalone) compared to $899.63\text{ ms}$ ($5.47\text{ GB}$) for uncompressed drafting at $32\text{k}$, maintains stable proposal acceptance ($\alpha_{\text{eval}} = 77.8\%\text{--}80.5\%$), outperforms Full-SD at $8\text{k}$ ($37.25$ vs.\ $34.66\text{ tok/s}$) and $16\text{k}$ ($22.06$ vs.\ $20.94\text{ tok/s}$) while reducing co-located VRAM by $2.82\text{ GB}$ ($20.92$ vs.\ $23.74\text{ GB}$), and completes $32\text{k}$ inference in $24.87\text{ GB}$ where Full-SD triggers CUDA OOM ($31.36\text{ GiB}$ GPU limit). At $16\text{k}$--$32\text{k}$, however, target prefill ($1.69\text{ s} \to 4.18\text{ s}$) and full-target KV verification dominate total latency, leaving Target AR faster end-to-end ($25.85$ and $14.93\text{ tok/s}$) when target-side KV sparsity is absent.
+
+\paragraph{Qualitative Case Studies (Where Attention Selection Helps Beyond BM25):}
+Inspection of multi-document failures illustrates why attention selection complements lexical heuristics: (1) On claim \texttt{avc-112225db89c2b57383e8} (8 passages, $71.9\text{k}$ chars, querying Kenyan county agriculture budget allocations), \texttt{BM25 Sent-B10k} over-ranks repetitive table-of-contents lines sharing numeric/sector keywords ($\alpha_{\text{eval}} = 75.56\%$, $21.32\text{ tok/s}$) and \texttt{BM25 Top-2} drops cited passage \texttt{E1} ($\alpha_{\text{eval}} = 61.94\%$, $19.78\text{ tok/s}$), whereas SPADE preserves document headings and methodological sentences in \texttt{E1} ($\alpha_{\text{eval}} = 89.04\%$, $23.12\text{ tok/s}$). (2) On claim \texttt{avc-1e16687b945b8bf25d70} (4 passages, $27.4\text{k}$ chars, \textit{Vitamin D prevents COVID-19 infection and reduces severity}), \texttt{BM25 Top-2} omits cited passages \texttt{E2, E3} ($69.44\%$, $43.70\text{ tok/s}$) and \texttt{BM25 Sent-B10k} achieves $70.59\%$ ($45.55\text{ tok/s}$), whereas SPADE retains high-saliency clinical findings across all four passages ($80.56\%$, $48.44\text{ tok/s}$).
 
 \newpage
 \section{ACL Reproducibility Checklist \& Artifact Availability}

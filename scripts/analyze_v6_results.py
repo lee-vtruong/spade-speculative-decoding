@@ -489,8 +489,10 @@ def main() -> None:
                 b = l173_vs_full.get(lbl)
                 ci_s = f"{b['delta']:+.2f} [{b['ci_lo']:+.2f}, {b['ci_hi']:+.2f}]" if b else "—"
             b_lbl = f"\\textbf{{{lbl}}}"
-            if "SPADE" in lbl:
+            if lbl == "SPADE B=10k (Default)":
                 lines.append(f"{b_lbl} & {dt_s} & \\textbf{{{kv_s}}} & {sel_s} & \\textbf{{{ae_s}}} & \\textbf{{{ap_s}}} & {r['dec_tok_s']:.2f} & \\textbf{{{r['e2e_tok_s']:.2f}}} & {ci_s} \\\\")
+            elif lbl == "SPADE B=2k":
+                lines.append(f"{b_lbl} & {dt_s} & \\textbf{{{kv_s}}} & {sel_s} & {ae_s} & {ap_s} & {r['dec_tok_s']:.2f} & {r['e2e_tok_s']:.2f} & {ci_s} \\\\")
             else:
                 lines.append(f"{b_lbl} & {dt_s} & {kv_s} & {sel_s} & {ae_s} & {ap_s} & {r['dec_tok_s']:.2f} & {r['e2e_tok_s']:.2f} & {ci_s} \\\\")
         tex = (
@@ -521,8 +523,10 @@ def main() -> None:
                 d_s = f"{b['delta']:+.2f} [{b['ci_lo']:+.2f}, {b['ci_hi']:+.2f}]" if b else "—"
             f1_s = f"{r['qa_f1_pct']:.1f}" if r["qa_f1_pct"] is not None else "—"
             sub_s = f"{r['qa_sub_pct']:.1f}\\%" if r["qa_sub_pct"] is not None else "—"
-            if "SPADE" in lbl:
+            if lbl == "SPADE B=10k":
                 lines.append(f"\\textbf{{{lbl}}} & {dt_s} & \\textbf{{{kv_s}}} & \\textbf{{{ae_s}}} & \\textbf{{{r['e2e_tok_s']:.2f}}} & \\textbf{{{spd_ar}}} & {d_s} & {f1_s} / {sub_s} \\\\")
+            elif lbl == "SPADE B=2k":
+                lines.append(f"\\textbf{{{lbl}}} & {dt_s} & \\textbf{{{kv_s}}} & {ae_s} & {r['e2e_tok_s']:.2f} & {spd_ar} & {d_s} & {f1_s} / {sub_s} \\\\")
             else:
                 lines.append(f"\\textbf{{{lbl}}} & {dt_s} & {kv_s} & {ae_s} & {r['e2e_tok_s']:.2f} & {spd_ar} & {d_s} & {f1_s} / {sub_s} \\\\")
         tex = (
@@ -530,7 +534,7 @@ def main() -> None:
             "\\begin{tabular}{lccccccr}\n\\toprule\n"
             "\\textbf{Method} & \\textbf{Draft Tok} & \\textbf{Draft KV} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{E2E tok/s} & \\textbf{vs.\\ AR} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} & \\textbf{QA F1 / Sub-EM} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Second-Benchmark Generalization on LongBench HotpotQA Multi-Document QA ($N=100$, mean 14,083 tokens):} Evaluated on Qwen3-8B/0.6B under identical speculative configuration ($K=4, T=0.7, \\text{top-}p=0.9$). QA F1 and answer substring recall (Sub-EM) confirm downstream quality preservation alongside KV compression and throughput gains.}\n"
+            "\\caption{\\textbf{Second-Benchmark Generalization on LongBench HotpotQA Multi-Document QA ($N=100$, mean 14,083 tokens):} Evaluated on Qwen3-8B/0.6B ($K=4, T=0.7, \\text{top-}p=0.9$). SPADE ($B=10\\text{k}$) reduces draft KV by $-79.7\\%$ and outperforms Baseline Full ($+1.37\\text{ tok/s}$, $p_{\\text{Holm}}<10^{-4}$), KV-Sparse ($+2.05\\text{ tok/s}$), and PLD ($+4.00\\text{ tok/s}$), while plain Target AR remains faster at 14k mean length without target-side KV sparsity. QA F1/Sub-EM differences are non-significant after Holm correction ($p_{\\text{Holm}}=0.953$ vs.\\ Full, $0.127$ vs.\\ AR).}\n"
             "\\label{tab:longbench_hotpot}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_longbench_hotpot.tex").write_text(tex, encoding="utf-8")
@@ -579,7 +583,7 @@ def main() -> None:
             "\\begin{tabular}{lcc}\n\\toprule\n"
             "\\textbf{Selector / Hyperparameter Configuration} & \\textbf{Draft Tokens} & \\textbf{$\\mathbb{E}[1-\\text{TV}]$ (\\%)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Disjoint Dev-Split Selector & Hyperparameter Ablation ($N=50$ long claims):} Teacher-forced expected acceptance $1 - \\text{TV}(p,q)$ across scoring normalizations, window size $W$, layer subsets, head aggregation, and budgets $B$.}\n"
+            "\\caption{\\textbf{Disjoint Dev-Split Selector \\& Hyperparameter Ablation ($N=50$ long claims):} Teacher-forced expected acceptance $1 - \\text{TV}(p,q)$ across scoring normalizations, window size $W$, layer subsets, head aggregation, and budgets $B$.}\n"
             "\\label{tab:dev_selector_ablation}\n\\end{table}\n"
         )
         (TABLES_DIR / "table_dev_selector_ablation.tex").write_text(tex, encoding="utf-8")

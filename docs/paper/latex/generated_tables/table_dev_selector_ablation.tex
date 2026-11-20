@@ -1,0 +1,35 @@
+\begin{table}[t]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcc}
+\toprule
+\textbf{Selector / Hyperparameter Configuration} & \textbf{Draft Tokens} & \textbf{$\mathbb{E}[1-\text{TV}]$ (\%)} \\
+\midrule
+Baseline Full & 9,864.6 & 77.14\% \\
+BM25 Sent-B10k & 2,294.7 & 76.09\% \\
+Random Sent-B10k & 2,253.3 & 74.04\% \\
+SPADE Default (upper50, W=16, mean, sum, B=10k) & 2,503.1 & 76.27\% \\
+Norm: sentence\_agg=mean & 2,433.4 & 76.24\% \\
+Norm: sentence\_agg=sqrt & 2,472.3 & 76.34\% \\
+Norm: sentence\_agg=max & 2,516.2 & 76.19\% \\
+Tail Window W=1 & 2,507.4 & 75.24\% \\
+Tail Window W=4 & 2,527.9 & 76.04\% \\
+Tail Window W=8 & 2,529.7 & 76.15\% \\
+Tail Window W=32 & 2,503.1 & 76.27\% \\
+Layers: upper25 & 2,475.1 & 76.39\% \\
+Layers: middle50 & 2,475.9 & 76.20\% \\
+Layers: all & 2,408.8 & 75.42\% \\
+Layers: last1 & 2,444.7 & 74.31\% \\
+Head Agg: max & 2,488.0 & 76.35\% \\
+Budget B=1k & 481.2 & 70.86\% \\
+Budget B=2k & 724.4 & 72.17\% \\
+Budget B=4k & 1,196.7 & 74.60\% \\
+Budget B=8k & 2,076.6 & 75.99\% \\
+Budget B=16k & 3,709.2 & 76.59\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Disjoint Dev-Split Selector \& Hyperparameter Ablation ($N=50$ long claims):} Teacher-forced expected acceptance $1 - \text{TV}(p,q)$ across scoring normalizations, window size $W$, layer subsets, head aggregation, and budgets $B$.}
+\label{tab:dev_selector_ablation}
+\end{table}

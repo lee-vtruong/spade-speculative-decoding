@@ -1,0 +1,19 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccr}
+\toprule
+\textbf{Selector ($B=10\text{k}$ / Top-2)} & \textbf{Pass.\ Cov.} & \textbf{Own Cited Ret.} & \textbf{Shared AR Cited Ret.} & \textbf{Justif.\ Lex.\ Cov. (Own / AR)} & \textbf{Gold Lex.\ Cov.} \\
+\midrule
+\textbf{SPADE} & 100.0\% & 100.0\% (354/354) & 100.0\% (322/322) & 81.3\% / 81.0\% & 75.8\% \\
+\textbf{SPADE No-Coverage} & 99.7\% & 99.7\% (354/355) & 99.7\% (321/322) & 81.3\% / 81.0\% & 75.8\% \\
+\textbf{BM25 Sent-B10k} & 100.0\% & 100.0\% (328/328) & 100.0\% (322/322) & 84.5\% / 83.8\% & 77.6\% \\
+\textbf{Random Sent-B10k} & 100.0\% & 100.0\% (293/293) & 100.0\% (322/322) & 78.0\% / 78.0\% & 72.3\% \\
+\textbf{BM25 Top-2} & 60.8\% & 62.3\% (195/313) & 61.8\% (199/322) & 83.4\% / 83.8\% & 82.0\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Passage Coverage, Citation Retention, and Non-Stopword Lexical Content Recall Across All Selectors (300 Held-Out Claims):} Reports both per-trajectory cited passage retention and paired recall against shared Target AR citations and summaries.}
+\label{tab:selector_coverage_all}
+\end{table*}

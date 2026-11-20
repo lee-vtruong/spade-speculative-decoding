@@ -1,19 +1,19 @@
-\begin{table}[ht]
+\begin{table*}[t]
 \centering
 \small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{rcccc}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccr}
 \toprule
-\textbf{Context Length} & \textbf{Target 8B Prefill} & \textbf{Full Draft 0.6B} & \textbf{SPADE Draft} & \textbf{Draft Peak VRAM} \\
+\textbf{Context Len} & \textbf{Target 8B Prefill} & \textbf{Hook (ms / $\Delta$VRAM)} & \textbf{Draft Prefill (F $\to$ S)} & \textbf{Total Prefill (F $\to$ S)} & \textbf{AR tok/s} & \textbf{Full-SD tok/s (VRAM)} & \textbf{SPADE $\alpha_{\text{eval}}$} & \textbf{SPADE tok/s (VRAM)} \\
 \midrule
-2,048 tokens & 175.8 ms & 27.4 ms & 25.0 ms & 1.94 GB / 1.8 GB \\
-4,096 tokens & 355.3 ms & 53.7 ms & 25.0 ms & 3.55 GB / 1.9 GB \\
-8,192 tokens & 772.6 ms & 119.1 ms & 25.2 ms & 5.95 GB / 2.0 GB \\
-16,384 tokens & 1,742.3 ms & 319.4 ms & 25.2 ms & 10.75 GB / 2.1 GB \\
-32,768 tokens & —$^{\dagger}$ & 941.3 ms & \textbf{25.2 ms} & 20.36 GB / \textbf{2.1 GB} \\
+2k (2,133) & 169.0 ms & 6.51 ms / 19.1 MB & 25.4 $\to$ 21.6 ms & 194 $\to$ 197 (+1.4\%) ms & 38.44 & 64.82 (17.2G) & 78.3\% & \textbf{60.17} (17.6G) \\
+4k (4,162) & 347.3 ms & 6.58 ms / 37.0 MB & 48.3 $\to$ 21.6 ms & 396 $\to$ 375 (-5.1\%) ms & 36.52 & 52.00 (18.1G) & 77.8\% & \textbf{52.08} (18.0G) \\
+8k (8,248) & 750.4 ms & 9.17 ms / 73.7 MB & 108.7 $\to$ 21.6 ms & 859 $\to$ 781 (-9.1\%) ms & 31.29 & 34.66 (20.0G) & 80.3\% & \textbf{37.25} (19.0G) \\
+16k (16,345) & 1688.8 ms & 16.34 ms / 144.0 MB & 298.3 $\to$ 21.6 ms & 1987 $\to$ 1727 (-13.1\%) ms & 25.85 & 20.94 (23.7G) & 78.0\% & \textbf{22.06} (20.9G) \\
+32k (33,057) & 4182.2 ms & 30.59 ms / 291.0 MB & 899.6 $\to$ 21.6 ms & 5082 $\to$ 4234 (-16.7\%) ms & 14.93 & OOM & 80.5\% & \textbf{11.29} (24.9G) \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Prompt Prefill Latency and Memory Scaling on RTX 5090 (PyTorch SDPA):} Benchmarking target verifier (Qwen3-8B) and draft model (Qwen3-0.6B) prefill across sequence lengths up to $32\text{k}$ tokens. Uncompressed drafting scales from $27.4\text{ ms} \to 941.3\text{ ms}$ and consumes $20.36\text{ GB}$ VRAM. In contrast, SPADE caps draft prompt length via fixed character budgeting, keeping draft prefill flat at $\approx 25.2\text{ ms}$ and draft peak memory at $2.1\text{ GB}$. $^{\dagger}$At $32\text{k}$ tokens, co-allocating full target and full draft KV caches exceeds 32GB VRAM without FlashAttention chunking.}
+\caption{\textbf{End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}):} Reports target prefill, exact hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM. While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute at 16k--32k tokens.}
 \label{tab:long_context_scaling}
-\end{table}
+\end{table*}
