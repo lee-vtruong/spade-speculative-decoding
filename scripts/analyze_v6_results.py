@@ -694,12 +694,19 @@ def main() -> None:
         fl_gain_pct = ((sp_e2e_v / fl_e2e_v) - 1.0) * 100.0 if fl_e2e_v > 0 else 0.0
         kv_sav_pct = ((sp_kv_v / full_kv) - 1.0) * 100.0 if full_kv > 0 else 0.0
 
+        sp_ar_p = llama3_pairwise.get("SPADE (Ours) vs B0-S (Target AR)", {}).get("e2e_tok_s", {}).get("p_holm", 1.0)
+        sp_fl_p = llama3_pairwise.get("SPADE (Ours) vs Baseline Full", {}).get("e2e_tok_s", {}).get("p_holm", 1.0)
+        sp_t2_p = llama3_pairwise.get("SPADE (Ours) vs BM25 Top-2", {}).get("e2e_tok_s", {}).get("p_holm", 1.0)
+        fl_d = sp_e2e_v - fl_e2e_v
+        t2_e2e_v = next((r["e2e_tok_s"] for r in llama3["rows"] if r["label"] == "BM25 Top-2"), 0.0)
+        t2_d = sp_e2e_v - t2_e2e_v
+
         comp_tex = (
             "\\begin{table}[t]\n\\centering\n\\small\n\\resizebox{\\columnwidth}{!}{%\n"
             "\\begin{tabular}{lccccccr}\n\\toprule\n"
             "\\textbf{Method} & \\textbf{Draft Tok} & \\textbf{Draft KV} & \\textbf{$\\alpha_{\\text{eval}}/\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Dec} & \\textbf{E2E} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(comp_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            f"\\caption{{\\textbf{{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):}} SPADE achieves {ar_gain_pct:+.1f}\\% over Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s) and {fl_gain_pct:+.1f}\\% over Baseline Full ({fl_e2e_v:.2f} tok/s) with {kv_sav_pct:.1f}\\% draft KV reduction (* $p_{{\\text{{Holm}}}} < 0.001$; full metrics in Appendix Table \\ref{{tab:llama3_generalization_full}}).}}\n"
+            f"\\caption{{\\textbf{{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):}} SPADE recovers E2E parity with Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s, $p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$) and outperforms Baseline Full by {fl_gain_pct:+.1f}\\% ($p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$) and BM25 Top-2 ($p_{{\\text{{Holm}}}}={sp_t2_p:.3f}$) with {kv_sav_pct:.1f}\\% active draft KV (full metrics in Appendix Table \\ref{{tab:llama3_generalization_full}}).}}\n"
             "\\label{tab:llama3_generalization}\n\\end{table}\n"
         )
         (TABLES_DIR / "table_llama3_generalization.tex").write_text(comp_tex, encoding="utf-8")
@@ -709,7 +716,7 @@ def main() -> None:
             "\\begin{tabular}{llcccccccccc}\n\\toprule\n"
             "\\textbf{Decoding Method} & \\textbf{Context Policy} & \\textbf{Mean Draft Tok} & \\textbf{Active Draft KV} & \\textbf{Peak GPU VRAM} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Decode Thpt} & \\textbf{E2E Thpt} & \\textbf{E2E Latency} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(full_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            f"\\caption{{\\textbf{{Full Cross-Family Generalization Matrix on 300 Held-Out Claims (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, RTX 5090):}} Throughput in tok/s; latency in ms/tok. Paired cluster bootstrap CIs ($B=10,000$; * denotes $p_{{\\text{{Holm}}}} < 0.001$). SPADE achieves {ar_gain_pct:+.1f}\\% over Target AR and {fl_gain_pct:+.1f}\\% over Baseline Full while reducing active draft KV by {kv_sav_pct:.1f}\\% ({full_kv:.1f} MB $\\to$ {sp_kv_v:.1f} MB).}}\n"
+            f"\\caption{{\\textbf{{Full Cross-Family Generalization Matrix on 300 Held-Out Claims (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, RTX 5090):}} Throughput in tok/s; latency in ms/tok. Paired cluster bootstrap CIs ($B=10,000$). SPADE matches Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s, $p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$) and outperforms Baseline Full by {fl_gain_pct:+.1f}\\% (${fl_d:+.2f}\\text{{ tok/s}}$, $p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$) and BM25 Top-2 by ${t2_d:+.2f}\\text{{ tok/s}}$ ($p_{{\\text{{Holm}}}}={sp_t2_p:.3f}$) while reducing active draft KV by {kv_sav_pct:.1f}\\% ({full_kv:.1f} MB $\\to$ {sp_kv_v:.1f} MB).}}\n"
             "\\label{tab:llama3_generalization_full}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_llama3_generalization_full.tex").write_text(full_tex, encoding="utf-8")

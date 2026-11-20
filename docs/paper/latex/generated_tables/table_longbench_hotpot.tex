@@ -16,6 +16,6 @@
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{LongBench HotpotQA Multi-Document QA ($N=100$, mean 14,083 tok, Qwen3-8B/0.6B):} SPADE ($B=10\text{k}$) cuts draft KV $-79.7\%$ and beats Full-SD ($+1.37\text{ tok/s}$, $p_{\text{Holm}}<10^{-4}$), KV-Sparse ($+2.05$), and PLD ($+4.00$); Target AR leads at 14k without target-KV sparsity. QA F1/Sub-EM differences are N.S.\ ($p_{\text{Holm}} \ge 0.127$).}
+\caption{\textbf{Second-Benchmark Generalization on LongBench HotpotQA Multi-Document QA ($N=100$, mean 14,083 tokens):} Evaluated on Qwen3-8B/0.6B ($K=4, T=0.7, \text{top-}p=0.9$). SPADE ($B=10\text{k}$) reduces draft KV by $-79.7\%$ and outperforms Baseline Full ($+1.37\text{ tok/s}$, $p_{\text{Holm}}<10^{-4}$), KV-Sparse ($+2.05\text{ tok/s}$), and PLD ($+4.00\text{ tok/s}$), while plain Target AR remains faster at 14k mean length without target-side KV sparsity. QA F1/Sub-EM differences are non-significant after Holm correction ($p_{\text{Holm}}=0.953$ vs.\ Full, $0.127$ vs.\ AR).}
 \label{tab:longbench_hotpot}
 \end{table*}
