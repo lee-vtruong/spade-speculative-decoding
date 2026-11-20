@@ -118,6 +118,7 @@ def _verify_llama3_smoke(target_snap: str, draft_snap: str) -> None:
     if (Path("outputs/runs/v7_llama3/llama3-heldout300-b0s") / "metrics.json").exists():
         print("SKIP Llama-3 smoke test (v7_llama3/llama3-heldout300-b0s already exists)", flush=True)
         return
+    shutil.rmtree("outputs/runs/v7_smoke/llama3-smoke2", ignore_errors=True)
     smoke_cmd = [
         PYTHON_BIN, "scripts/run_baselines.py",
         "--mode", "B2",
