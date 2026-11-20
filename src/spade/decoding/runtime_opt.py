@@ -129,6 +129,15 @@ class StaticDraftRunner:
 
         self.model = model
         self.mode = mode
+        if mode in {"compile_default", "compile_reduce_overhead", "cudagraph_static"}:
+            params = list(model.parameters()) if hasattr(model, "parameters") else []
+            if len({p.device for p in params}) <= 1:
+                try:
+                    from accelerate.hooks import remove_hook_from_module
+
+                    remove_hook_from_module(self.model, recurse=True)
+                except ImportError:
+                    pass
         self.max_cache_len = int(max_cache_len)
         self.device = device or self._infer_device(model)
         self.dtype = dtype or self._infer_dtype(model)
@@ -251,6 +260,14 @@ class StaticDraftRunner:
         out = self.model(**kwargs)
         return out.logits[0, -1]
 
+    def _mark_cudagraph_step_begin(self) -> None:
+        if (
+            self.mode == "compile_reduce_overhead"
+            and hasattr(torch, "compiler")
+            and hasattr(torch.compiler, "cudagraph_mark_step_begin")
+        ):
+            torch.compiler.cudagraph_mark_step_begin()
+
     def prepare(self, *, warmup_steps: int = 3) -> RunnerSetupTimings:
         """Run one-time compilation, warmup, and/or CUDA graph capture.
 
@@ -270,6 +287,7 @@ class StaticDraftRunner:
             self._compiled_step = torch.compile(self._raw_step, mode=compile_mode, fullgraph=False)
             # Trigger actual compilation on the first traced call
             with torch.inference_mode():
+                self._mark_cudagraph_step_begin()
                 _ = self._compiled_step(
                     self._static_input_ids,
                     self._static_cache_position,
@@ -282,6 +300,7 @@ class StaticDraftRunner:
             with torch.inference_mode():
                 for i in range(1, max(2, warmup_steps) + 1):
                     self._update_step_pos(i)
+                    self._mark_cudagraph_step_begin()
                     _ = self._compiled_step(
                         self._static_input_ids,
                         self._static_cache_position,
@@ -530,6 +549,7 @@ class StaticDraftRunner:
                 self._graph.replay()
                 logits = self._static_logits_out.float().clone()
             elif self._compiled_step is not None:
+                self._mark_cudagraph_step_begin()
                 logits = self._compiled_step(
                     self._static_input_ids,
                     self._static_cache_position,
