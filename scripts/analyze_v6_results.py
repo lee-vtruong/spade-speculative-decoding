@@ -258,26 +258,33 @@ def analyze_theorem1_300() -> dict[str, Any]:
             for c in cids
         ]
 
-        def _tv_from_idxs(idxs: list[int]) -> float:
-            ca: Counter[str] = Counter()
-            cb: Counter[str] = Counter()
-            ta = tb = 0
-            for i in idxs:
-                ca.update(cnt_a[i])
-                cb.update(cnt_b[i])
-                ta += len_a[i]
-                tb += len_b[i]
-            vocab = set(ca) | set(cb)
-            return 0.5 * sum(abs(ca[w] / ta - cb[w] / tb) for w in vocab)
+        tot_ca: Counter[str] = Counter()
+        tot_cb: Counter[str] = Counter()
+        for ca_i, cb_i in zip(cnt_a, cnt_b):
+            tot_ca.update(ca_i)
+            tot_cb.update(cb_i)
+        tot_ta = sum(len_a)
+        tot_tb = sum(len_b)
+        vocab = list(set(tot_ca) | set(tot_cb))
+        obs_tv = 0.5 * sum(abs(tot_ca[w] / tot_ta - tot_cb[w] / tot_tb) for w in vocab)
 
-        obs_tv = _tv_from_idxs(list(range(n)))
-        tv_boots = sorted(_tv_from_idxs([rng.randrange(n) for _ in range(n)]) for _ in range(2000))
+        loo_tvs = []
+        for i in range(n):
+            ta_i = tot_ta - len_a[i]
+            tb_i = tot_tb - len_b[i]
+            ci_a = cnt_a[i]
+            ci_b = cnt_b[i]
+            tv_i = 0.5 * sum(abs((tot_ca[w] - ci_a.get(w, 0)) / ta_i - (tot_cb[w] - ci_b.get(w, 0)) / tb_i) for w in vocab)
+            loo_tvs.append(tv_i)
+        mean_loo = sum(loo_tvs) / n
+        se_jack = math.sqrt(((n - 1) / n) * sum((x - mean_loo) ** 2 for x in loo_tvs))
         k_agree = sum(verd_eq)
         w_lo, w_hi = _wilson_ci(k_agree, n)
         out_pairs[title] = {
             "n_claims": n,
             "tv_1gram": round(obs_tv, 4),
-            "tv_ci95": [round(tv_boots[int(0.025 * 2000)], 4), round(tv_boots[int(0.975 * 2000)], 4)],
+            "tv_se_jackknife": round(se_jack, 4),
+            "tv_ci95": [round(max(0.0, obs_tv - 1.96 * se_jack), 4), round(min(1.0, obs_tv + 1.96 * se_jack), 4)],
             "verdict_agreement_pct": round((k_agree / n) * 100.0, 2),
             "verdict_agreement_ci95_pct": [round(w_lo * 100.0, 2), round(w_hi * 100.0, 2)],
             "mean_tokens_a": round(statistics.mean(tok_a), 1),
