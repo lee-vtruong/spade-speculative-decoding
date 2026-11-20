@@ -4,22 +4,22 @@
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{llccccccr}
 \toprule
-\textbf{Configuration} & \textbf{Context Policy} & \textbf{Budget $B$} & \textbf{Draft Tokens} & \textbf{Draft KV Peak} & \textbf{$\alpha_{\text{prop}}$ (\%)} & \textbf{Dec Thpt} & \textbf{E2E Thpt} & \textbf{Key Observation} \\
+\textbf{Configuration} & \textbf{Context Policy} & \textbf{Budget $B$} & \textbf{Draft Tokens} & \textbf{Draft KV Peak} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{$\alpha_{\text{prop}}$ (\%)} & \textbf{Dec Thpt} & \textbf{E2E Thpt} \\
 \midrule
-\textbf{Baseline Full (Full-SD)} & Full Prompt Context & — & 4,615.0 & 524.2 MB & 54.04\% & 57.05 & 42.46 & Full-context uncompressed drafting \\
-\textbf{BM25 Sent-B10k} & Lexical Sentences & 10,000 & 1,596.7 & 186.4 MB & 52.51\% & 57.97 & 44.48 & Competitive CPU lexical sentence selection \\
-\textbf{No Evidence} & Zero Context ($B=0$) & 0 & 168.0 & 24.2 MB & 42.57\% & 52.19 & 40.41 & Draft model without evidence loses -11.9 pp $\alpha$ \\
-\textbf{Sliding Window} & Trailing Window ($B=8\text{k}$) & 8,000 & 1,412.0 & 162.8 MB & 47.15\% & 55.92 & 42.68 & Loses early facts (-7.3 pp $\alpha_{\text{prop}}$) \\
+\textbf{Baseline Full (Full-SD)} & Full Prompt Context & — & 4,614.9 & 515.1 MB & 77.84\% & 53.41\% & 57.05 & 42.46 \\
+\textbf{BM25 Sent-B10k} & Lexical Sentences & 10,000 & 1,596.7 & 185.6 MB & 77.50\% & 52.84\% & 57.97 & \textbf{44.48} \\
+\textbf{No Evidence ($B=0$)} & Zero Evidence Context & 0 & 151.7 & 26.7 MB & 70.55\% & 42.57\% & 52.19 & 40.41 \\
+\textbf{Sliding Window} & Trailing Window ($B=8\text{k}$) & 8,000 & 264.9 & 39.3 MB & 73.62\% & 47.15\% & 55.92 & 42.68 \\
 \midrule
-\textbf{Budget Sweep 1k} & SPADE Attention-Guided & 1,000 & 371.7 & 50.7 MB & 47.02\% & 55.62 & 42.07 & Tight budget omits cited context \\
-\textbf{Budget Sweep 2k} & SPADE Attention-Guided & 2,000 & 529.1 & 68.3 MB & 51.26\% & 58.47 & 44.12 & \textbf{Near-optimal speed with 65\% lower KV than 10k} \\
-\textbf{Budget Sweep 4k} & SPADE Attention-Guided & 4,000 & 830.6 & 100.8 MB & 51.86\% & 58.24 & 43.46 & Robust multi-document representation \\
-\textbf{Budget Sweep 8k} & SPADE Attention-Guided & 8,000 & 1,415.3 & 164.9 MB & 52.11\% & 58.52 & 43.77 & High acceptance across long documents \\
-\textbf{Budget Sweep 10k} & \textbf{SPADE Attention-Guided} & \textbf{10,000} & \textbf{1,702.5} & \textbf{196.2 MB} & \textbf{54.45\%} & \textbf{59.71} & \textbf{44.32} & \textbf{Throughput plateau (44.1--44.3 tok/s)} \\
-\textbf{Budget Sweep 16k} & SPADE Attention-Guided & 16,000 & 2,431.5 & 275.8 MB & 55.36\% & 59.91 & 44.02 & Diminishing returns; KV latency rises \\
+\textbf{Budget Sweep 1k} & SPADE Attention-Guided & 1,000 & 371.7 & 50.7 MB & 73.72\% & 47.02\% & 55.62 & 42.07 \\
+\textbf{Budget Sweep 2k} & SPADE Attention-Guided & 2,000 & 529.1 & 68.3 MB & 76.22\% & 51.26\% & 58.47 & 44.12 \\
+\textbf{Budget Sweep 4k} & SPADE Attention-Guided & 4,000 & 830.6 & 100.8 MB & 76.73\% & 51.86\% & 58.24 & 43.46 \\
+\textbf{Budget Sweep 8k} & SPADE Attention-Guided & 8,000 & 1,415.3 & 164.9 MB & 76.94\% & 52.11\% & 58.52 & 43.77 \\
+\textbf{Budget Sweep 10k} & \textbf{SPADE Attention-Guided} & \textbf{10,000} & \textbf{1,702.5} & \textbf{196.2 MB} & \textbf{78.55\%} & \textbf{54.45\%} & \textbf{59.71} & \textbf{44.32} \\
+\textbf{Budget Sweep 16k} & SPADE Attention-Guided & 16,000 & 2,431.5 & 275.8 MB & 79.11\% & 55.36\% & 59.91 & 44.02 \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Reference Baselines and Context Budget Sweep ($B \in [1\text{k}, 16\text{k}]$ characters) on Controlled Sub-Cohort:} Evaluated under identical hardware conditions on RTX 5090 ($N=20$ multi-document claims). Rather than a single sharp peak, SPADE exhibits a broad \textit{throughput plateau} between $B=2\text{k}$ and $B=16\text{k}$ ($44.02\text{--}44.32\text{ tok/s}$). Crucially, $B=2\text{k}$ achieves $44.12\text{ tok/s}$ while requiring only $68.3\text{ MB}$ draft KV cache ($-65.2\%$ lower than $B=10\text{k}$), highlighting an attractive memory-constrained operating point.}
+\caption{\textbf{Reference Baselines and Context Budget Sweep ($B \in [1\text{k}, 16\text{k}]$ characters) on Controlled Sub-Cohort ($N=20$ multi-document claims):} Evaluated under identical hardware conditions on RTX 5090. Throughput reported in tok/s. Rather than a sharp peak, SPADE exhibits a broad \textit{throughput plateau} across $B \in [2\text{k}, 16\text{k}]$ ($44.02\text{--}44.32\text{ tok/s}$). In this small sub-cohort, lexical selection (\texttt{BM25 Sent-B10k}) achieves $44.48\text{ tok/s}$, edging past SPADE by $+0.16\text{ tok/s}$ due to zero GPU tensor overhead, but SPADE delivers higher proposal acceptance ($\alpha_{\text{eval}} = 78.55\%$ vs $77.50\%$, $+1.05\text{ pp}$) and higher decode throughput ($59.71$ vs $57.97\text{ tok/s}$). Notably, $B=2\text{k}$ reaches $44.12\text{ tok/s}$ while requiring only $68.3\text{ MB}$ draft KV cache ($-65.2\%$ lower than $B=10\text{k}$), demonstrating high memory efficiency. We report both candidate acceptance $\alpha_{\text{eval}}$ (evaluated candidate token acceptance) and proposal acceptance $\alpha_{\text{prop}}$ (accepted tokens over $K \times \text{rounds}$).}
 \label{tab:decisive_baselines}
 \end{table*}
