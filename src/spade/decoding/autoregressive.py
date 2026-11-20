@@ -41,5 +41,7 @@ def validate_tokenizers(target: Any, draft: Any) -> None:
 
 def format_qwen_prompt(tokenizer: Any, prompt: str) -> str:
     messages=[{"role":"user","content":prompt}]
-    try: return tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True,enable_thinking=False)
-    except TypeError as exc: raise RuntimeError("Tokenizer chat template does not expose enable_thinking=False; refusing undocumented formatting") from exc
+    try:
+        return tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True,enable_thinking=False)
+    except TypeError:
+        return tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)

@@ -202,17 +202,26 @@ def _summarize_suite(specs: list[tuple[str, Path]], bench_answers: dict[str, lis
         cm = _extract_run_claims(rdir, bench_answers=bench_answers)
         cmaps[label] = cm
         clist = list(cm.values())
+        e2e_tok_s = _pooled(clist, "e2e_tok_s")
+        peak_vram_gb = 0.0
+        env_p = rdir / "environment.json"
+        if env_p.exists():
+            env = json.loads(env_p.read_text(encoding="utf-8"))
+            if env.get("gpu_peak_allocated_bytes"):
+                peak_vram_gb = round(max(env["gpu_peak_allocated_bytes"]) / (1024.0 ** 3), 2)
         rows.append({
             "label": label,
             "n_claims": len(clist),
             "draft_tok": round(_pooled(clist, "draft_tok"), 1),
             "draft_kv_mb": round(_pooled(clist, "draft_kv_mb"), 1),
+            "gpu_peak_allocated_gb": peak_vram_gb,
             "sel_ms_claim": round(_pooled(clist, "sel_ms_claim"), 2),
             "alpha_eval_pct": round(_pooled(clist, "alpha_eval_pct"), 2),
             "alpha_prop_pct": round(_pooled(clist, "alpha_prop_pct"), 2),
             "tok_per_round": round(_pooled(clist, "tok_per_round"), 3),
             "dec_tok_s": round(_pooled(clist, "dec_tok_s"), 2),
-            "e2e_tok_s": round(_pooled(clist, "e2e_tok_s"), 2),
+            "e2e_tok_s": round(e2e_tok_s, 2),
+            "e2e_lat_ms": round(1000.0 / e2e_tok_s, 2) if e2e_tok_s > 0 else 0.0,
             "per_claim_e2e_tok_s": round(_pooled(clist, "per_claim_e2e_tok_s"), 2),
             "qa_f1_pct": round(_pooled(clist, "qa_f1_pct"), 2) if bench_answers else None,
             "qa_sub_pct": round(_pooled(clist, "qa_sub_pct"), 2) if bench_answers else None,
@@ -346,6 +355,7 @@ def main() -> None:
     # 2. Long-173 Controlled Baseline Suite
     l173_specs = [
         ("Baseline Full", RUNS_DIR / "v6_long173" / "long173-baseline-full"),
+        ("KV-Sparse (B=2,529)", RUNS_DIR / "v6_long173" / "long173-kvsparse-2529"),
         ("KV-Sparse (B=1,776)", RUNS_DIR / "v6_long173" / "long173-kvsparse-1776"),
         ("KV-Sparse (B=512)", RUNS_DIR / "v6_long173" / "long173-kvsparse-512"),
         ("Prompt-Lookup (PLD)", RUNS_DIR / "v6_long173" / "long173-pld"),
@@ -371,10 +381,11 @@ def main() -> None:
         for lbl, padj in zip(keys_order, holm_bonferroni(raw_ps)):
             l173_vs_full[lbl]["p_holm"] = round(padj, 4)
 
-    # Pairwise key comparisons on Long-173 (SPADE B=10k vs BM25, KV-Sparse-1776, PLD; SPADE B=2k vs KV-Sparse-512)
+    # Pairwise key comparisons on Long-173 (SPADE B=10k vs BM25, KV-Sparse-2529/1776, PLD; SPADE B=2k vs KV-Sparse-512)
     l173_pairwise = {}
     for ta, tb in [
         ("SPADE B=10k (Default)", "BM25 Sent-B10k"),
+        ("SPADE B=10k (Default)", "KV-Sparse (B=2,529)"),
         ("SPADE B=10k (Default)", "KV-Sparse (B=1,776)"),
         ("SPADE B=10k (Default)", "Prompt-Lookup (PLD)"),
         ("SPADE B=2k", "KV-Sparse (B=512)"),
@@ -459,13 +470,63 @@ def main() -> None:
         for v_f, pf_i in zip(lb_qa_f1_holm.values(), holm_bonferroni([x["p_raw"] for x in lb_qa_f1_holm.values()])):
             v_f["p_holm"] = round(pf_i, 4)
 
-    # 4. Theorem 1 (300 claims + teacher-forced)
+    # 4. Cross-Family Llama-3.1-8B / Llama-3.2-1B (Heldout 300)
+    llama3_specs = [
+        ("B0-S (Target AR)", RUNS_DIR / "v7_llama3" / "llama3-heldout300-b0s", "Full (Target Only)"),
+        ("Baseline Full", RUNS_DIR / "v7_llama3" / "llama3-heldout300-baseline-full", "Full $\\to$ Full"),
+        ("BM25 Top-2", RUNS_DIR / "v7_llama3" / "llama3-heldout300-bm25-top2", "Full $\\to$ Top-2"),
+        ("BM25 Sent-B10k", RUNS_DIR / "v7_llama3" / "llama3-heldout300-bm25-b10k", "Full $\\to$ Sent B=10k"),
+        ("SPADE (Ours)", RUNS_DIR / "v7_llama3" / "llama3-heldout300-spade-b10k", "Full $\\to$ Attn B=10k"),
+    ]
+    llama3_policy_map = {lbl: pol for lbl, _, pol in llama3_specs}
+    llama3 = _summarize_suite([(lbl, p) for lbl, p, _ in llama3_specs])
+    llama3_vs_full = {}
+    if "Baseline Full" in llama3["cmaps"]:
+        rps = []
+        ko = []
+        for row in llama3["rows"]:
+            lbl = row["label"]
+            if lbl == "Baseline Full":
+                continue
+            b = _boot(llama3["cmaps"]["Baseline Full"], llama3["cmaps"][lbl], "e2e_tok_s")
+            llama3_vs_full[lbl] = b
+            rps.append(b["p_raw"])
+            ko.append(lbl)
+        for lbl, padj in zip(ko, holm_bonferroni(rps)):
+            llama3_vs_full[lbl]["p_holm"] = round(padj, 4)
+
+    llama3_pairwise = {}
+    for ta, tb in [
+        ("SPADE (Ours)", "B0-S (Target AR)"),
+        ("SPADE (Ours)", "Baseline Full"),
+        ("SPADE (Ours)", "BM25 Sent-B10k"),
+        ("SPADE (Ours)", "BM25 Top-2"),
+    ]:
+        if ta in llama3["cmaps"] and tb in llama3["cmaps"]:
+            entry = {"e2e_tok_s": _boot(llama3["cmaps"][tb], llama3["cmaps"][ta], "e2e_tok_s")}
+            if tb != "B0-S (Target AR)":
+                entry["alpha_eval_pct"] = _boot(llama3["cmaps"][tb], llama3["cmaps"][ta], "alpha_eval_pct")
+                entry["alpha_prop_pct"] = _boot(llama3["cmaps"][tb], llama3["cmaps"][ta], "alpha_prop_pct")
+            llama3_pairwise[f"{ta} vs {tb}"] = entry
+    if llama3_pairwise:
+        for v, pt_i in zip(llama3_pairwise.values(), holm_bonferroni([v["e2e_tok_s"]["p_raw"] for v in llama3_pairwise.values()])):
+            v["e2e_tok_s"]["p_holm"] = round(pt_i, 4)
+        a_items = [v["alpha_eval_pct"] for v in llama3_pairwise.values() if "alpha_eval_pct" in v]
+        if a_items:
+            for va, pa_i in zip(a_items, holm_bonferroni([x["p_raw"] for x in a_items])):
+                va["p_holm"] = round(pa_i, 4)
+
+    llama3_hook_path = REV_DIR / "hook_exactness_llama3.json"
+    llama3_hook = json.loads(llama3_hook_path.read_text(encoding="utf-8")) if llama3_hook_path.exists() else None
+
+    # 5. Theorem 1 (300 claims + teacher-forced)
     thm1_300 = analyze_theorem1_300()
 
     master = {
         "heldout300_holm": h300_comps,
         "long173": {"rows": l173["rows"], "vs_full": l173_vs_full, "pairwise_holm": l173_pairwise},
         "longbench": {"rows": lb["rows"], "vs_full": lb_vs_full, "pairwise_holm": lb_pairwise, "qa_f1_holm": lb_qa_f1_holm},
+        "llama3": {"rows": llama3["rows"], "vs_full": llama3_vs_full, "pairwise_holm": llama3_pairwise, "hook_exactness": llama3_hook},
         "theorem1_300": thm1_300,
     }
     (REV_DIR / "v6_master_analysis.json").write_text(json.dumps(master, indent=2) + "\n", encoding="utf-8")
@@ -500,7 +561,7 @@ def main() -> None:
             "\\begin{tabular}{lcccccccr}\n\\toprule\n"
             "\\textbf{Configuration} & \\textbf{Draft Tok / KV Slots} & \\textbf{Draft KV Peak} & \\textbf{Sel./Evict (ms)} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Dec tok/s} & \\textbf{E2E tok/s} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Controlled Long-Context Baseline & Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Supersedes the 20-claim pilot. Compares uncompressed Full-SD, attention-evicted KV-Sparse (SnapKV-style retaining sink+recent+pooled attention KV with RoPE offset preservation), training-free Prompt-Lookup Decoding (PLD), sliding window, zero-evidence ($B=0$), lexical BM25, and SPADE at $B=2\\text{k}$ and $B=10\\text{k}$. Reported CIs use paired claim-cluster bootstrap ($B=10,000$).}\n"
+            "\\caption{\\textbf{Controlled Long-Context Baseline \\& Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Supersedes the 20-claim pilot. Compares uncompressed Full-SD, our SnapKV-style \\texttt{KV-Sparse} attention-eviction baseline (retaining sink+recent+pooled attention KV with RoPE offset preservation; distinct from TriForce/MagicDec target-side KV sparsity), training-free Prompt-Lookup Decoding (PLD), sliding window, zero-evidence ($B=0$), lexical BM25, and SPADE at $B=2\\text{k}$ and $B=10\\text{k}$ (plus slot-matched $B=2,529$). Reported CIs use paired claim-cluster bootstrap ($B=10,000$).}\n"
             "\\label{tab:decisive_baselines}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_decisive_baselines.tex").write_text(tex, encoding="utf-8")
@@ -544,31 +605,114 @@ def main() -> None:
     if sc_path.exists():
         sc = json.loads(sc_path.read_text(encoding="utf-8"))
         lines = []
+        measured_2k_hook = ""
         for L_str in ["2048", "4096", "8192", "16384", "32768"]:
             d = sc.get(L_str) or sc.get(int(L_str), {})
             if not d:
                 continue
             L_lbl = f"{int(L_str)//1024}k"
             t_pre = f"{d['target_8b_prefill_ms']:.1f}" if "target_8b_prefill_ms" in d else "—"
-            hk = f"{d['hook_ms']:.2f} ms / {d['hook_peak_delta_mb']:.1f} MB" if "hook_ms" in d else "—"
+            if d.get("bypass_active"):
+                hk = "0.00 ms (bypass)"
+                if "hook_ms_measured" in d:
+                    measured_2k_hook = f" Standalone forced-hook overhead at 2k is {d['hook_ms_measured']:.2f} ms."
+            elif "hook_ms" in d:
+                hk = f"{d['hook_ms']:.2f} ms / {d['hook_peak_delta_mb']:.1f} MB"
+            else:
+                hk = "—"
             df_pre = f"{d['full_draft_prefill_ms']:.1f} -> {d['spade_draft_prefill_ms']:.1f}" if "target_8b_prefill_ms" in d else f"{d['full_draft_prefill_ms']:.1f} -> 25.2"
             tot_pre = f"{d['total_prefill_full_ms']:.0f} -> {d['total_prefill_spade_ms']:.0f} ({-d['total_prefill_saved_pct']:+.1f}\\%)" if "total_prefill_full_ms" in d else "—"
             ar_e2e = f"{d['ar_e2e_tok_s']:.2f}" if "ar_e2e_tok_s" in d else "OOM"
             fl_e2e = f"{d['full_sd_e2e_tok_s']:.2f} ({d['full_sd_peak_vram_gb']:.1f}G)" if "full_sd_e2e_tok_s" in d else "OOM"
             sp_alpha = f"{d['spade_alpha_eval_pct']:.1f}\\%" if "spade_alpha_eval_pct" in d else "—"
             sp_e2e = f"\\textbf{{{d['spade_e2e_tok_s']:.2f}}} ({d['spade_peak_vram_gb']:.1f}G)" if "spade_e2e_tok_s" in d else "OOM"
+            if "delta_spade_vs_full" in d:
+                dsf = d["delta_spade_vs_full"]
+                ci_full = f"{dsf['delta']:+.2f} [{dsf['ci_lo']:+.2f}, {dsf['ci_hi']:+.2f}]"
+            elif "full_sd_error" in d or "full_sd_e2e_tok_s" not in d:
+                ci_full = "Full OOM"
+            else:
+                ci_full = "—"
             df_pre = df_pre.replace("->", "$\\to$")
             tot_pre = tot_pre.replace("->", "$\\to$")
-            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_alpha} & {sp_e2e} \\\\")
+            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_alpha} & {sp_e2e} & {ci_full} \\\\")
         tex = (
             "\\begin{table*}[t]\n\\centering\n\\small\n\\resizebox{\\textwidth}{!}{%\n"
-            "\\begin{tabular}{lcccccccr}\n\\toprule\n"
-            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} \\\\\n"
+            "\\begin{tabular}{lccccccccr}\n\\toprule\n"
+            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{logits\\_to\\_keep=1}):} Reports target prefill, exact hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM. While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute at 16k--32k tokens.}\n"
+            f"\\caption{{\\textbf{{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{{logits\\_to\\_keep=1}}, $N=20$ at 2k--16k, $N=10$ at 32k):}} Reports target prefill, hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM and paired bootstrap 95\\% CIs ($B=10,000$). At 2k, \\texttt{{StaticCache}} capacities are matched identically and SPADE triggers its short-context bypass.{measured_2k_hook} While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute beyond 10k--14k tokens.}}\n"
             "\\label{tab:long_context_scaling}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_long_context_scaling.tex").write_text(tex, encoding="utf-8")
+
+    # Table: Llama-3.1-8B / Llama-3.2-1B Cross-Family Generalization (Main Compact + Full Appendix)
+    if llama3["rows"]:
+        ar_thpt = next((r["e2e_tok_s"] for r in llama3["rows"] if "AR" in r["label"]), 0.0)
+        full_kv = next((r["draft_kv_mb"] for r in llama3["rows"] if r["label"] == "Baseline Full"), 0.0)
+        sp_row = next((r for r in llama3["rows"] if r["label"] == "SPADE (Ours)"), None)
+        full_row = next((r for r in llama3["rows"] if r["label"] == "Baseline Full"), None)
+
+        comp_lines = []
+        full_lines = []
+        for r in llama3["rows"]:
+            lbl = r["label"]
+            pol = llama3_policy_map.get(lbl, "")
+            is_sp = lbl == "SPADE (Ours)"
+            is_ar = "AR" in lbl
+            dt_s = f"{r['draft_tok']:,.1f}" if (r["draft_tok"] > 0 and not is_ar) else "—"
+            kv_s = f"{r['draft_kv_mb']:.1f} MB" if r["draft_kv_mb"] > 0 else "—"
+            vr_s = f"{r['gpu_peak_allocated_gb']:.2f} GB" if r.get("gpu_peak_allocated_gb", 0.0) > 0 else "—"
+            ae_s = f"{r['alpha_eval_pct']:.2f}\\%" if r["alpha_eval_pct"] > 0 else "—"
+            ap_s = f"{r['alpha_prop_pct']:.2f}\\%" if r["alpha_prop_pct"] > 0 else "—"
+            a_pair = f"{r['alpha_eval_pct']:.2f} / {r['alpha_prop_pct']:.2f}" if r["alpha_eval_pct"] > 0 else "—"
+            tr_s = f"{r['tok_per_round']:.3f}"
+            dec_s = f"{r['dec_tok_s']:.2f}"
+            e2e_s = f"{r['e2e_tok_s']:.2f}"
+            lat_s = f"{r['e2e_lat_ms']:.2f}"
+            if lbl == "Baseline Full":
+                ci_s = "—"
+            else:
+                b = llama3_vs_full.get(lbl)
+                star = "$^*$" if (b and b.get("p_holm", 1.0) < 0.001) else ""
+                ci_s = f"{b['delta']:+.2f} [{b['ci_lo']:+.2f}, {b['ci_hi']:+.2f}]{star}" if b else "—"
+
+            def _b(s: str) -> str:
+                return f"\\textbf{{{s}}}" if is_sp else s
+
+            comp_lines.append(
+                f"\\textbf{{{lbl}}} & {_b(dt_s)} & {_b(kv_s)} & {_b(a_pair)} & {_b(tr_s)} & {_b(dec_s)} & {_b(e2e_s)} & {_b(ci_s)} \\\\"
+            )
+            full_lines.append(
+                f"\\textbf{{{lbl}}} & {pol} & {_b(dt_s)} & {_b(kv_s)} & {_b(vr_s)} & {_b(ae_s)} & {_b(ap_s)} & {_b(tr_s)} & {_b(dec_s)} & {_b(e2e_s)} & {_b(lat_s)} & {_b(ci_s)} \\\\"
+            )
+
+        sp_e2e_v = sp_row["e2e_tok_s"] if sp_row else 0.0
+        fl_e2e_v = full_row["e2e_tok_s"] if full_row else 0.0
+        sp_kv_v = sp_row["draft_kv_mb"] if sp_row else 0.0
+        ar_gain_pct = ((sp_e2e_v / ar_thpt) - 1.0) * 100.0 if ar_thpt > 0 else 0.0
+        fl_gain_pct = ((sp_e2e_v / fl_e2e_v) - 1.0) * 100.0 if fl_e2e_v > 0 else 0.0
+        kv_sav_pct = ((sp_kv_v / full_kv) - 1.0) * 100.0 if full_kv > 0 else 0.0
+
+        comp_tex = (
+            "\\begin{table}[t]\n\\centering\n\\small\n\\resizebox{\\columnwidth}{!}{%\n"
+            "\\begin{tabular}{lccccccr}\n\\toprule\n"
+            "\\textbf{Method} & \\textbf{Draft Tok} & \\textbf{Draft KV} & \\textbf{$\\alpha_{\\text{eval}}/\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Dec} & \\textbf{E2E} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
+            "\\midrule\n" + "\n".join(comp_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
+            f"\\caption{{\\textbf{{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):}} SPADE achieves {ar_gain_pct:+.1f}\\% over Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s) and {fl_gain_pct:+.1f}\\% over Baseline Full ({fl_e2e_v:.2f} tok/s) with {kv_sav_pct:.1f}\\% draft KV reduction (* $p_{{\\text{{Holm}}}} < 0.001$; full metrics in Appendix Table \\ref{{tab:llama3_generalization_full}}).}}\n"
+            "\\label{tab:llama3_generalization}\n\\end{table}\n"
+        )
+        (TABLES_DIR / "table_llama3_generalization.tex").write_text(comp_tex, encoding="utf-8")
+
+        full_tex = (
+            "\\begin{table*}[t]\n\\centering\n\\small\n\\resizebox{\\textwidth}{!}{%\n"
+            "\\begin{tabular}{llcccccccccc}\n\\toprule\n"
+            "\\textbf{Decoding Method} & \\textbf{Context Policy} & \\textbf{Mean Draft Tok} & \\textbf{Active Draft KV} & \\textbf{Peak GPU VRAM} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Decode Thpt} & \\textbf{E2E Thpt} & \\textbf{E2E Latency} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
+            "\\midrule\n" + "\n".join(full_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
+            f"\\caption{{\\textbf{{Full Cross-Family Generalization Matrix on 300 Held-Out Claims (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, RTX 5090):}} Throughput in tok/s; latency in ms/tok. Paired cluster bootstrap CIs ($B=10,000$; * denotes $p_{{\\text{{Holm}}}} < 0.001$). SPADE achieves {ar_gain_pct:+.1f}\\% over Target AR and {fl_gain_pct:+.1f}\\% over Baseline Full while reducing active draft KV by {kv_sav_pct:.1f}\\% ({full_kv:.1f} MB $\\to$ {sp_kv_v:.1f} MB).}}\n"
+            "\\label{tab:llama3_generalization_full}\n\\end{table*}\n"
+        )
+        (TABLES_DIR / "table_llama3_generalization_full.tex").write_text(full_tex, encoding="utf-8")
 
     # Table: Dev Selector Ablations
     dev_path = REV_DIR / "dev_selector_ablation.json"

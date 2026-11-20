@@ -1,18 +1,19 @@
-"""Full End-to-End Long-Context Scaling Benchmark (2k to 32k tokens) on RTX 5090.
+"""Controlled End-to-End Long-Context Scaling Benchmark (2k to 32k tokens) on RTX 5090.
 
-Measures (averaged across 3 distinct base prompts per length, properly warmed up):
-  1. Target 8B prefill latency (ms) and peak VRAM (with logits_to_keep=1, SDPA)
-  2. TargetPrefillAttentionHook (upper 50% layers, W=16) latency (ms) & delta VRAM (MB) across 2k-32k
-  3. Full Draft 0.6B vs SPADE Draft 0.6B (capped <= 2,000 tokens, B=10k) prefill latency (ms)
-  4. Total Prefill (Target + Draft + Hook) & % Total Prefill Saved
-  5. Co-Located End-to-End Throughput (tok/s), Decode Throughput (tok/s), Alpha_eval, & Peak Combined VRAM (GB):
-       - Target AR (B0-S)
-       - Full-SD (Baseline Full, K=4, StaticDraftRunner)
-       - SPADE (Attention-Selected, B=10k, K=4, StaticDraftRunner)
+Addresses reviewer requirements for statistical power and fair 2k bypass parity:
+  - Uses N=20 distinct AVeriTeC-formatted prompts at L in {2048, 4096, 8192, 16384}
+    and N=10 distinct prompts at L = 32768 (128 generated tokens per prompt).
+  - Interleaves AR (B0-S), Full-SD, and SPADE across 5-prompt mini-blocks (alternating
+    SPADE vs Full-SD execution order across odd/even blocks) to cancel thermal drift.
+  - Matches StaticCache capacity identically between Full-SD and SPADE at L=2048 (bypass)
+    and isolates SPADE vs Full-SD cache sizes cleanly at longer lengths.
+  - Reports paired bootstrap 95% CIs (B=10,000) for Δ(SPADE - Full-SD) and Δ(SPADE - AR).
 """
 from __future__ import annotations
 
+import gc
 import json
+import random
 import statistics
 import time
 from pathlib import Path
@@ -39,21 +40,15 @@ def _build_prompt_at_length(
     tok: Any,
     target_tokens: int,
     base_row: dict[str, Any],
-    bench_rows: list[dict[str, Any]],
+    pool_passages: list[str],
+    start_offset: int,
 ) -> dict[str, Any]:
     """Construct a valid AVeriTeC-formatted row padded cleanly with long passages (~target_tokens)."""
-    # Collect substantial passages (>= 1,500 chars) so passage count stays realistic (~5-16 passages even at 32k)
-    pool_passages: list[str] = []
-    for r in bench_rows:
-        if r["claim_id"] == base_row["claim_id"]:
-            continue
-        for e in r.get("evidence") or []:
-            txt = str(e.get("text", "")).strip()
-            if len(txt) >= 1500:
-                pool_passages.append(txt)
-
-    ev = [{"evidence_id": str(e.get("evidence_id", f"E{i+1}")), "text": str(e.get("text", ""))} for i, e in enumerate(base_row.get("evidence") or [])]
-    idx_p = 0
+    ev = [
+        {"evidence_id": str(e.get("evidence_id", f"E{i+1}")), "text": str(e.get("text", ""))}
+        for i, e in enumerate(base_row.get("evidence") or [])
+    ]
+    idx_p = start_offset
     while True:
         prompt_str, phash = build_prompt(base_row["claim"], ev, mode="retrieved")
         ser = format_qwen_prompt(tok, prompt_str)
@@ -72,6 +67,15 @@ def _build_prompt_at_length(
             ev[-1]["text"] = last_txt[: len(last_txt) - trim_chars]
         else:
             ev.pop()
+    if target_tokens == 2048:
+        while len(ev) > 1 and sum(len(str(e["text"])) for e in ev) > 9800:
+            over = sum(len(str(e["text"])) for e in ev) - 9800
+            if over < len(ev[-1]["text"]) - 100:
+                ev[-1]["text"] = ev[-1]["text"][: len(ev[-1]["text"]) - over]
+                break
+            ev.pop()
+        if len(ev) == 1 and len(str(ev[0]["text"])) > 9800:
+            ev[0]["text"] = ev[0]["text"][:9800]
     prompt_str, phash = build_prompt(base_row["claim"], ev, mode="retrieved")
     ser = format_qwen_prompt(tok, prompt_str)
     n_tok = len(tok(ser, add_special_tokens=False)["input_ids"])
@@ -94,22 +98,84 @@ def _eval_alpha_pct(gen) -> float:
     return (acc / len(ev)) * 100.0
 
 
+def _paired_ratio_boot(
+    base_recs: list[tuple[int, float]],
+    treat_recs: list[tuple[int, float]],
+    *,
+    n_boot: int = 10000,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Paired cluster bootstrap on pooled aggregate tok/s = sum(tokens)/sum(time_s)."""
+    n = len(base_recs)
+    b_tok = sum(r[0] for r in base_recs)
+    b_tim = sum(r[1] for r in base_recs)
+    t_tok = sum(r[0] for r in treat_recs)
+    t_tim = sum(r[1] for r in treat_recs)
+    b_val = (b_tok / b_tim) if b_tim > 0 else 0.0
+    t_val = (t_tok / t_tim) if t_tim > 0 else 0.0
+    delta = t_val - b_val
+    rng = random.Random(seed)
+    boots: list[float] = []
+    for _ in range(n_boot):
+        bt = bm = tt = tm = 0.0
+        for _k in range(n):
+            idx = rng.randrange(n)
+            bt += base_recs[idx][0]
+            bm += base_recs[idx][1]
+            tt += treat_recs[idx][0]
+            tm += treat_recs[idx][1]
+        boots.append((tt / tm if tm > 0 else 0.0) - (bt / bm if bm > 0 else 0.0))
+    boots.sort()
+    lo = boots[int(0.025 * n_boot)]
+    hi = boots[min(n_boot - 1, int(0.975 * n_boot))]
+    p2 = min(
+        1.0,
+        2.0 * min(sum(1 for x in boots if x <= 0.0) / n_boot, sum(1 for x in boots if x >= 0.0) / n_boot),
+    )
+    return {
+        "base": round(b_val, 2),
+        "treat": round(t_val, 2),
+        "delta": round(delta, 2),
+        "ci_lo": round(lo, 2),
+        "ci_hi": round(hi, 2),
+        "p_raw": round(p2, 4),
+    }
+
+
 def main() -> None:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     bench_rows = [json.loads(l) for l in BENCH_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
-    base_candidates = [r for r in bench_rows if sum(len(str(e.get("text", ""))) for e in r.get("evidence", [])) <= 10000][:3]
-    if len(base_candidates) < 3:
-        base_candidates = bench_rows[:3]
+
+    # Pool long passages (>= 1,500 chars) for clean realistic padding
+    pool_passages: list[str] = []
+    for r in bench_rows:
+        for e in r.get("evidence") or []:
+            txt = str(e.get("text", "")).strip()
+            if len(txt) >= 1500:
+                pool_passages.append(txt)
+
+    base_pool = sorted(
+        bench_rows,
+        key=lambda r: sum(len(str(e.get("text", ""))) for e in (r.get("evidence") or [])),
+    )[:20]
+
+    n_by_len = {2048: 20, 4096: 20, 8192: 20, 16384: 20, 32768: 10}
     lengths = [2048, 4096, 8192, 16384, 32768]
 
     tok = AutoTokenizer.from_pretrained(TARGET_SNAP, local_files_only=True)
     prompts_by_len: dict[int, list[dict[str, Any]]] = {
-        L: [_build_prompt_at_length(tok, L, br, bench_rows) for br in base_candidates] for L in lengths
+        L: [
+            _build_prompt_at_length(tok, L, base_pool[i], pool_passages, start_offset=i * 7)
+            for i in range(n_by_len[L])
+        ]
+        for L in lengths
     }
 
-    # Part A: Standalone Draft Prefill (for clean component comparison)
+    # Part A: Standalone Draft Prefill Latency & VRAM (mean of 3 repeats after warmup)
     comp_results: dict[int, dict[str, Any]] = {}
-    draft_only = AutoModelForCausalLM.from_pretrained(DRAFT_SNAP, dtype=torch.bfloat16, device_map="cuda", local_files_only=True).eval()
+    draft_only = AutoModelForCausalLM.from_pretrained(
+        DRAFT_SNAP, dtype=torch.bfloat16, device_map="cuda", local_files_only=True
+    ).eval()
     for L in lengths:
         inp = torch.randint(10, 5000, (1, L), device="cuda", dtype=torch.long)
         with torch.inference_mode():
@@ -126,6 +192,7 @@ def main() -> None:
             times_ms.append((time.perf_counter() - t0) * 1000.0)
             del out
         comp_results[L] = {
+            "n_prompts": n_by_len[L],
             "full_draft_prefill_ms": round(statistics.mean(times_ms), 2),
             "full_draft_standalone_vram_gb": round(torch.cuda.max_memory_allocated() / (1024 ** 3), 2),
         }
@@ -146,31 +213,44 @@ def main() -> None:
     spade_draft_ms = round(statistics.mean(spade_draft_times), 2)
     spade_draft_vram_gb = round(torch.cuda.max_memory_allocated() / (1024 ** 3), 2)
     del draft_only, spade_inp
+    gc.collect()
     torch.cuda.empty_cache()
 
-    # Part B: Target 8B + Hook + Co-Located AR / SPADE (StaticCache capacity 5632, matching run_baselines.py)
-    pair = QwenPair(TARGET_SNAP, DRAFT_SNAP, local_files_only=True, dtype="bfloat16", draft_attn_implementation="flex_attention")
+    # Part B: Target 8B + Hook + Interleaved E2E Comparisons (AR, Full-SD, SPADE)
+    pair = QwenPair(
+        TARGET_SNAP, DRAFT_SNAP, local_files_only=True, dtype="bfloat16", draft_attn_implementation="flex_attention"
+    )
     n_t_layers = len(pair.target.model.layers)
     hook_layers = resolve_layer_indices(n_t_layers, "upper50")
-    pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=5632, warmup_steps=3)
 
-    # Global warmups BEFORE timing any scaling points (compiles FlexAttention prefill & target verify graphs!)
+    # Initial warmup on target model AR
     wrow = prompts_by_len[4096][0]
     for gw in range(2):
-        _ = pair.generate(wrow["prompt"], mode="B0-S", max_new_tokens=32, temperature=0.7, top_p=0.9, seed=99 + gw, cache_strategy="kv_cache", distribution_mode="fp32_fast")
-        _ = pair.generate(wrow["prompt"], mode="B2", max_new_tokens=32, draft_length=4, temperature=0.7, top_p=0.9, seed=99 + gw, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": wrow, "budget_chars": 10000, "tail_window": 16})
-    torch.cuda.synchronize()
+        _ = pair.generate(
+            wrow["prompt"],
+            mode="B0-S",
+            max_new_tokens=16,
+            temperature=0.7,
+            top_p=0.9,
+            seed=99 + gw,
+            cache_strategy="kv_cache",
+            distribution_mode="fp32_fast",
+        )
     torch.cuda.empty_cache()
 
     for L in lengths:
-        row0 = prompts_by_len[L][0]
-        p_ids = tok(format_qwen_prompt(tok, row0["prompt"]), add_special_tokens=False)["input_ids"]
-        inp = torch.tensor([p_ids], dtype=torch.long, device="cuda")
+        plist = prompts_by_len[L]
+        n_p = len(plist)
+        max_actual = max(r["actual_tokens"] for r in plist)
+        full_cap = ((max_actual + 256 + 127) // 128) * 128
+        spade_cap = min(full_cap, 5632)  # Identical cache capacity at 2k bypass!
 
-        # Measure Target Prefill & Hook exact overhead over 3 repeats
+        # 1. Measure Target 8B Prefill & Hook exact overhead over 5 distinct prompts (1 repeat after warmup)
         t_times, hk_times, hk_deltas_mb = [], [], []
         t_vram_gb = 0.0
-        for _ in range(3):
+        for p_idx_h in range(min(5, n_p)):
+            p_ids = tok(format_qwen_prompt(tok, plist[p_idx_h]["prompt"]), add_special_tokens=False)["input_ids"]
+            inp = torch.tensor([p_ids], dtype=torch.long, device="cuda")
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -187,10 +267,10 @@ def main() -> None:
                 hk_deltas_mb.append(max(0.0, (hk_peak - base_alloc) / (1024 ** 2)))
                 del out, imp
             t_vram_gb = max(t_vram_gb, torch.cuda.max_memory_allocated() / (1024 ** 3))
+            del inp
             torch.cuda.empty_cache()
-        del inp
 
-        comp_results[L]["actual_tokens"] = round(statistics.mean(r["actual_tokens"] for r in prompts_by_len[L]))
+        comp_results[L]["actual_tokens"] = round(statistics.mean(r["actual_tokens"] for r in plist))
         comp_results[L]["target_8b_prefill_ms"] = round(statistics.mean(t_times), 2)
         comp_results[L]["hook_ms"] = round(statistics.mean(hk_times), 2)
         comp_results[L]["hook_peak_delta_mb"] = round(max(hk_deltas_mb), 2)
@@ -203,75 +283,169 @@ def main() -> None:
         comp_results[L]["total_prefill_spade_ms"] = round(tot_spade_pre, 2)
         comp_results[L]["total_prefill_saved_pct"] = round(((tot_full_pre - tot_spade_pre) / tot_full_pre) * 100.0, 1)
 
-        # Measure AR and SPADE across the 3 prompts (aggregate throughput = sum toks / sum time)
-        ar_toks = sp_toks = 0
-        ar_e2e_s = ar_dec_s = sp_e2e_s = sp_dec_s = 0.0
-        ar_vram = sp_vram = 0.0
-        sp_alphas, sp_dtoks = [], []
-        for idx_p, row in enumerate(prompts_by_len[L]):
+        # 2. Interleaved E2E measurements
+        ar_recs: list[tuple[int, float]] = [None] * n_p  # type: ignore[list-item]
+        sp_recs: list[tuple[int, float]] = [None] * n_p  # type: ignore[list-item]
+        fl_recs: list[tuple[int, float]] = [None] * n_p  # type: ignore[list-item]
+        ar_dec_s = sp_dec_s = fl_dec_s = 0.0
+        ar_vram = sp_vram = fl_vram = 0.0
+        sp_alphas, fl_alphas, sp_dtoks = [], [], []
+        sp_sel_ms, sp_dpref_ms, fl_dpref_ms = [], [], []
+        full_sd_error: str | None = None
+
+        def _run_ar(idx_p: int) -> None:
+            nonlocal ar_dec_s, ar_vram
+            row = plist[idx_p]
             torch.cuda.reset_peak_memory_stats()
-            g_ar = pair.generate(row["prompt"], mode="B0-S", max_new_tokens=128, temperature=0.7, top_p=0.9, seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast")
-            ar_toks += len(g_ar.token_ids)
-            ar_dec_s += g_ar.timings["decode_s"]
-            ar_e2e_s += g_ar.timings["prompt_prefill_s"] + g_ar.timings["decode_s"]
+            g = pair.generate(
+                row["prompt"], mode="B0-S", max_new_tokens=128, temperature=0.7, top_p=0.9,
+                seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast",
+            )
+            e2e = g.timings["prompt_prefill_s"] + g.timings["decode_s"]
+            ar_recs[idx_p] = (len(g.token_ids), e2e)
+            ar_dec_s += g.timings["decode_s"]
             ar_vram = max(ar_vram, torch.cuda.max_memory_allocated() / (1024 ** 3))
             torch.cuda.empty_cache()
 
+        def _run_spade(idx_p: int) -> None:
+            nonlocal sp_dec_s, sp_vram
+            row = plist[idx_p]
             torch.cuda.reset_peak_memory_stats()
-            g_sp = pair.generate(row["prompt"], mode="B2", max_new_tokens=128, draft_length=4, temperature=0.7, top_p=0.9, seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": row, "budget_chars": 10000, "tail_window": 16})
-            sp_toks += len(g_sp.token_ids)
-            sp_dec_s += g_sp.timings["decode_s"]
-            sp_e2e_s += g_sp.timings["prompt_prefill_s"] + g_sp.timings.get("context_selection_s", 0.0) + g_sp.timings["draft_prefill_s"] + g_sp.timings["decode_s"]
+            g = pair.generate(
+                row["prompt"], mode="B2", max_new_tokens=128, draft_length=4, temperature=0.7, top_p=0.9,
+                seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast",
+                target_attn_selector_cfg={"row": row, "budget_chars": 10000, "tail_window": 16},
+            )
+            e2e = g.timings["prompt_prefill_s"] + g.timings.get("context_selection_s", 0.0) + g.timings["draft_prefill_s"] + g.timings["decode_s"]
+            sp_recs[idx_p] = (len(g.token_ids), e2e)
+            sp_dec_s += g.timings["decode_s"]
             sp_vram = max(sp_vram, torch.cuda.max_memory_allocated() / (1024 ** 3))
-            sp_alphas.append(_eval_alpha_pct(g_sp))
-            sp_dtoks.append(g_sp.timings["draft_prompt_tokens"])
+            sp_alphas.append(_eval_alpha_pct(g))
+            sp_dtoks.append(g.timings["draft_prompt_tokens"])
+            sp_sel_ms.append(g.timings.get("context_selection_s", 0.0) * 1000.0)
+            sp_dpref_ms.append(g.timings["draft_prefill_s"] * 1000.0)
             torch.cuda.empty_cache()
 
-        comp_results[L]["ar_e2e_tok_s"] = round(ar_toks / ar_e2e_s, 2)
-        comp_results[L]["ar_dec_tok_s"] = round(ar_toks / ar_dec_s, 2)
+        def _run_full(idx_p: int) -> None:
+            nonlocal fl_dec_s, fl_vram
+            row = plist[idx_p]
+            torch.cuda.reset_peak_memory_stats()
+            g = pair.generate(
+                row["prompt"], mode="B2", max_new_tokens=128, draft_length=4, temperature=0.7, top_p=0.9,
+                seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast",
+            )
+            e2e = g.timings["prompt_prefill_s"] + g.timings["draft_prefill_s"] + g.timings["decode_s"]
+            fl_recs[idx_p] = (len(g.token_ids), e2e)
+            fl_dec_s += g.timings["decode_s"]
+            fl_vram = max(fl_vram, torch.cuda.max_memory_allocated() / (1024 ** 3))
+            fl_alphas.append(_eval_alpha_pct(g))
+            fl_dpref_ms.append(g.timings["draft_prefill_s"] * 1000.0)
+            torch.cuda.empty_cache()
+
+        if L == 2048:
+            # Shared identical StaticCache capacity -> true per-prompt interleaving!
+            pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=full_cap, warmup_steps=3)
+            _ = pair.generate(plist[0]["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=99, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+            _ = pair.generate(plist[0]["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=100, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": plist[0], "budget_chars": 10000, "tail_window": 16})
+            torch.cuda.empty_cache()
+            for idx_p in range(n_p):
+                if idx_p % 2 == 0:
+                    _run_ar(idx_p); _run_full(idx_p); _run_spade(idx_p)
+                else:
+                    _run_ar(idx_p); _run_spade(idx_p); _run_full(idx_p)
+            pair.draft_runner = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        elif L < 32768:
+            # 4 interleaved mini-blocks of 5 prompts (alternating SPADE vs Full-SD order)
+            chunk_size = 5
+            for c_idx in range(0, n_p, chunk_size):
+                idxs = list(range(c_idx, min(n_p, c_idx + chunk_size)))
+                for idx_p in idxs:
+                    _run_ar(idx_p)
+                block_num = c_idx // chunk_size
+                order = ("spade", "full") if (block_num % 2 == 0) else ("full", "spade")
+                for arm in order:
+                    cap_use = spade_cap if arm == "spade" else full_cap
+                    pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=cap_use, warmup_steps=3)
+                    warm_cfg = {"row": plist[idxs[0]], "budget_chars": 10000, "tail_window": 16} if arm == "spade" else None
+                    _ = pair.generate(plist[idxs[0]]["prompt"], mode="B2", max_new_tokens=8, draft_length=4, temperature=0.7, top_p=0.9, seed=99, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg=warm_cfg)
+                    torch.cuda.empty_cache()
+                    for idx_p in idxs:
+                        if arm == "spade":
+                            _run_spade(idx_p)
+                        else:
+                            _run_full(idx_p)
+                    pair.draft_runner = None
+                    gc.collect()
+                    torch.cuda.empty_cache()
+        else:
+            # 32k (N=10): Interleave AR and SPADE directly per prompt, then probe Full-SD (catch OOM cleanly)
+            pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=spade_cap, warmup_steps=3)
+            _ = pair.generate(plist[0]["prompt"], mode="B2", max_new_tokens=8, draft_length=4, temperature=0.7, top_p=0.9, seed=99, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": plist[0], "budget_chars": 10000, "tail_window": 16})
+            torch.cuda.empty_cache()
+            for idx_p in range(n_p):
+                if idx_p % 2 == 0:
+                    _run_ar(idx_p); _run_spade(idx_p)
+                else:
+                    _run_spade(idx_p); _run_ar(idx_p)
+            pair.draft_runner = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            try:
+                pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=full_cap, warmup_steps=3)
+                _run_full(0)
+            except Exception as exc:
+                full_sd_error = str(exc)
+            finally:
+                pair.draft_runner = None
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        ar_tot_tok = sum(r[0] for r in ar_recs)
+        ar_tot_s = sum(r[1] for r in ar_recs)
+        sp_tot_tok = sum(r[0] for r in sp_recs)
+        sp_tot_s = sum(r[1] for r in sp_recs)
+
+        comp_results[L]["ar_e2e_tok_s"] = round(ar_tot_tok / ar_tot_s, 2)
+        comp_results[L]["ar_dec_tok_s"] = round(ar_tot_tok / ar_dec_s, 2)
         comp_results[L]["ar_peak_vram_gb"] = round(ar_vram, 2)
-        comp_results[L]["spade_e2e_tok_s"] = round(sp_toks / sp_e2e_s, 2)
-        comp_results[L]["spade_dec_tok_s"] = round(sp_toks / sp_dec_s, 2)
+        comp_results[L]["spade_e2e_tok_s"] = round(sp_tot_tok / sp_tot_s, 2)
+        comp_results[L]["spade_dec_tok_s"] = round(sp_tot_tok / sp_dec_s, 2)
         comp_results[L]["spade_alpha_eval_pct"] = round(statistics.mean(sp_alphas), 2)
         comp_results[L]["spade_draft_tokens"] = round(statistics.mean(sp_dtoks), 1)
         comp_results[L]["spade_peak_vram_gb"] = round(sp_vram, 2)
+        comp_results[L]["spade_e2e_sel_ms"] = round(statistics.mean(sp_sel_ms), 3)
+        comp_results[L]["spade_e2e_draft_prefill_ms"] = round(statistics.mean(sp_dpref_ms), 2)
+        comp_results[L]["delta_spade_vs_ar"] = _paired_ratio_boot(ar_recs, sp_recs)
 
-    # Part C: Full-SD across 2k..32k with compiled StaticDraftRunner (catching clean OOM at 32k)
-    pair.draft_runner = None
-    torch.cuda.empty_cache()
-    for L in lengths:
-        max_actual = max(r["actual_tokens"] for r in prompts_by_len[L])
-        cap = ((max_actual + 128 + 128 + 127) // 128) * 128
-        try:
-            pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=cap, warmup_steps=3)
-            # Warmup prefill kernel once before timing the 3 prompts
-            _ = pair.generate(prompts_by_len[L][0]["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=99, cache_strategy="kv_cache", distribution_mode="fp32_fast")
-            torch.cuda.empty_cache()
+        if L == 2048 and statistics.mean(sp_dtoks) >= 0.95 * comp_results[L]["actual_tokens"]:
+            comp_results[L]["bypass_active"] = True
+            comp_results[L]["hook_ms_measured"] = comp_results[L]["hook_ms"]
+            comp_results[L]["hook_ms_effective"] = round(statistics.mean(sp_sel_ms), 3)
+            comp_results[L]["spade_draft_prefill_ms"] = comp_results[L]["full_draft_prefill_ms"]
+            comp_results[L]["total_prefill_spade_ms"] = comp_results[L]["total_prefill_full_ms"]
+            comp_results[L]["total_prefill_saved_pct"] = 0.0
+        else:
+            comp_results[L]["bypass_active"] = False
+            comp_results[L]["hook_ms_effective"] = comp_results[L]["hook_ms"]
 
-            fl_toks = 0
-            fl_e2e_s = fl_dec_s = fl_vram = 0.0
-            fl_alphas = []
-            for idx_p, row in enumerate(prompts_by_len[L]):
-                torch.cuda.reset_peak_memory_stats()
-                g_fl = pair.generate(row["prompt"], mode="B2", max_new_tokens=128, draft_length=4, temperature=0.7, top_p=0.9, seed=42 + idx_p, cache_strategy="kv_cache", distribution_mode="fp32_fast")
-                fl_toks += len(g_fl.token_ids)
-                fl_dec_s += g_fl.timings["decode_s"]
-                fl_e2e_s += g_fl.timings["prompt_prefill_s"] + g_fl.timings["draft_prefill_s"] + g_fl.timings["decode_s"]
-                fl_vram = max(fl_vram, torch.cuda.max_memory_allocated() / (1024 ** 3))
-                fl_alphas.append(_eval_alpha_pct(g_fl))
-                torch.cuda.empty_cache()
-
-            comp_results[L]["full_sd_e2e_tok_s"] = round(fl_toks / fl_e2e_s, 2)
-            comp_results[L]["full_sd_dec_tok_s"] = round(fl_toks / fl_dec_s, 2)
+        if full_sd_error is None and all(r is not None for r in fl_recs):
+            fl_tot_tok = sum(r[0] for r in fl_recs)
+            fl_tot_s = sum(r[1] for r in fl_recs)
+            comp_results[L]["full_sd_e2e_tok_s"] = round(fl_tot_tok / fl_tot_s, 2)
+            comp_results[L]["full_sd_dec_tok_s"] = round(fl_tot_tok / fl_dec_s, 2)
             comp_results[L]["full_sd_alpha_eval_pct"] = round(statistics.mean(fl_alphas), 2)
             comp_results[L]["full_sd_peak_vram_gb"] = round(fl_vram, 2)
-        except Exception as exc:
-            comp_results[L]["full_sd_error"] = str(exc)
-        finally:
-            pair.draft_runner = None
-            torch.cuda.empty_cache()
+            comp_results[L]["full_e2e_draft_prefill_ms"] = round(statistics.mean(fl_dpref_ms), 2)
+            comp_results[L]["delta_spade_vs_full"] = _paired_ratio_boot(fl_recs, sp_recs)
+        else:
+            comp_results[L]["full_sd_error"] = full_sd_error or "Incomplete Full-SD run"
 
-    OUT_PATH.write_text(json.dumps(comp_results, indent=2) + "\n", encoding="utf-8")
+        # Save progressively after each length
+        OUT_PATH.write_text(json.dumps(comp_results, indent=2) + "\n", encoding="utf-8")
+        print(f"DONE L={L} (N={n_p}): AR={comp_results[L]['ar_e2e_tok_s']}, SPADE={comp_results[L]['spade_e2e_tok_s']}, Full={comp_results[L].get('full_sd_e2e_tok_s', 'OOM')}", flush=True)
+
     print(json.dumps(comp_results, indent=2))
 
 

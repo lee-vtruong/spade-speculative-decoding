@@ -187,3 +187,15 @@ def test_resolve_layer_indices_sentence_aggs_and_longbench_prompt():
     for agg in ("sum", "mean", "sqrt", "max"):
         _, s_sc = score_evidence_from_token_importance(imp, spans, sentence_agg=agg)
         assert len(s_sc) == 2 and all(v > 0 for v in s_sc[0])
+
+
+def test_format_qwen_prompt_supports_llama_fallback():
+    from spade.decoding.autoregressive import format_qwen_prompt
+
+    class _LlamaTok:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            assert tokenize is False and add_generation_prompt is True
+            return f"<|begin_of_text|>{messages[0]['content']}<|eot_id|>"
+
+    out = format_qwen_prompt(_LlamaTok(), "hello world")
+    assert out == "<|begin_of_text|>hello world<|eot_id|>"
