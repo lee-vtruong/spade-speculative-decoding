@@ -15,6 +15,6 @@
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{100\% Additive End-to-End Latency Decomposition per Generated Token (ms/tok) across 300 Held-Out Claims:} Generated automatically from benchmark timing counters. Loop/Unattr.\ overhead accounts for Python iteration scheduling, GPU synchronization, StaticCache rollback pointer updates, and token sampling launches ($0.170\text{--}0.181\text{ ms/tok}$). Minor residual discrepancies ($\le 0.001\text{ ms/tok}$) arise strictly from three-decimal floating-point rounding. Accounting strictly satisfies $\sum \text{components} + \text{Residual} = \text{Total E2E}$ with zero gap.}
+\caption{\textbf{Additive End-to-End Latency Decomposition per Generated Token (ms/tok) across 300 Held-Out Claims:} Generated automatically from benchmark timing counters. Loop/Unattr.\ overhead accounts for Python iteration scheduling, GPU synchronization, StaticCache rollback pointer updates, and token sampling launches ($0.170\text{--}0.181\text{ ms/tok}$). Minor residual discrepancies ($\le 0.001\text{ ms/tok}$) arise strictly from three-decimal floating-point rounding. Accounting strictly satisfies $\sum \text{components} + \text{Residual} = \text{Total E2E}$ with zero gap.}
 \label{tab:additive_breakdown}
 \end{table*}
