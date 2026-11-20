@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -118,18 +119,43 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def _extract_layer_keys(past_key_values: Any, layer_idx: int) -> torch.Tensor:
-    """Retrieve `[B, n_kv_heads, seq_len, head_dim]` key tensor from DynamicCache / tuple."""
+def extract_layer_kv(past_key_values: Any, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Retrieve `(keys, values)` tensors `[B, n_kv_heads, seq_len, head_dim]` from DynamicCache / tuple."""
     layers = getattr(past_key_values, "layers", None)
     if isinstance(layers, (list, tuple)) and layer_idx < len(layers):
         k = getattr(layers[layer_idx], "keys", None)
-        if isinstance(k, torch.Tensor):
-            return k
-    if hasattr(past_key_values, "key_cache") and layer_idx < len(past_key_values.key_cache):
-        return past_key_values.key_cache[layer_idx]
+        v = getattr(layers[layer_idx], "values", None)
+        if isinstance(k, torch.Tensor) and isinstance(v, torch.Tensor):
+            return k, v
+    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache") and layer_idx < len(past_key_values.key_cache):
+        return past_key_values.key_cache[layer_idx], past_key_values.value_cache[layer_idx]
     if isinstance(past_key_values, (tuple, list)) and layer_idx < len(past_key_values):
-        return past_key_values[layer_idx][0]
-    raise RuntimeError(f"Could not extract cached keys for layer {layer_idx}")
+        return past_key_values[layer_idx][0], past_key_values[layer_idx][1]
+    raise RuntimeError(f"Could not extract cached KV for layer {layer_idx}")
+
+
+def _extract_layer_keys(past_key_values: Any, layer_idx: int) -> torch.Tensor:
+    """Retrieve `[B, n_kv_heads, seq_len, head_dim]` key tensor from DynamicCache / tuple."""
+    return extract_layer_kv(past_key_values, layer_idx)[0]
+
+
+def resolve_layer_indices(n_layers: int, spec: str = "upper50") -> list[int]:
+    """Map a named layer-subset specification into valid layer indices."""
+    if n_layers <= 0:
+        return []
+    if spec == "upper50":
+        return list(range(max(0, n_layers // 2), n_layers))
+    if spec == "upper25":
+        return list(range(max(0, (3 * n_layers) // 4), n_layers))
+    if spec == "middle50":
+        lo = max(0, n_layers // 4)
+        hi = max(lo + 1, (3 * n_layers) // 4)
+        return list(range(lo, min(n_layers, hi)))
+    if spec == "all":
+        return list(range(n_layers))
+    if spec == "last1":
+        return [n_layers - 1]
+    raise ValueError(f"Unsupported layer subset spec: {spec!r}")
 
 
 class TargetPrefillAttentionHook:
@@ -185,11 +211,55 @@ class TargetPrefillAttentionHook:
         self._captured.clear()
 
     @torch.inference_mode()
+    def compute_layer_token_importance(
+        self,
+        l_idx: int,
+        past_key_values: Any,
+        *,
+        head_agg: str = "mean",
+    ) -> torch.Tensor:
+        """Compute exact 1D per-token importance `[P]` for a single hooked layer on-device."""
+        if head_agg not in {"mean", "max"}:
+            raise ValueError(f"Unsupported head_agg={head_agg!r}")
+        h_tail, cos_tail, sin_tail = self._captured[l_idx]
+        attn_mod = self.layers[l_idx].self_attn
+        k_all = _extract_layer_keys(past_key_values, l_idx)  # [B, n_kv, P, D]
+        bsz, n_kv, seq_len, head_dim = k_all.shape
+        w = int(h_tail.shape[1])
+
+        q_proj = attn_mod.q_proj(h_tail).view(bsz, w, -1, head_dim)
+        if hasattr(attn_mod, "q_norm") and attn_mod.q_norm is not None:
+            q_proj = attn_mod.q_norm(q_proj)
+        q_states = q_proj.transpose(1, 2)  # [B, n_q, w, D]
+        cos_u = cos_tail.unsqueeze(1)
+        sin_u = sin_tail.unsqueeze(1)
+        q_states = (q_states * cos_u) + (_rotate_half(q_states) * sin_u)
+
+        n_q = int(q_states.shape[1])
+        n_rep = max(1, n_q // n_kv)
+        q_grouped = q_states.view(bsz, n_kv, n_rep, w, head_dim)
+        k_grouped = k_all.unsqueeze(2)  # [B, n_kv, 1, P, D]
+        scaling = float(getattr(attn_mod, "scaling", head_dim ** -0.5))
+        scores = torch.matmul(q_grouped, k_grouped.transpose(-2, -1)) * scaling  # [B, n_kv, n_rep, w, P]
+
+        # Causal mask on the W x W bottom-right corner
+        if w > 1:
+            row_idx = torch.arange(seq_len - w, seq_len, device=scores.device).view(1, 1, 1, w, 1)
+            col_idx = torch.arange(seq_len, device=scores.device).view(1, 1, 1, 1, seq_len)
+            scores = scores.masked_fill(col_idx > row_idx, float("-inf"))
+
+        probs = torch.softmax(scores.float(), dim=-1)  # [B, n_kv, n_rep, w, P]
+        if head_agg == "max":
+            return probs[0].mean(dim=2).amax(dim=(0, 1))  # [P]
+        return probs[0].mean(dim=(0, 1, 2))  # [P]
+
+    @torch.inference_mode()
     def compute_token_importance(
         self,
         past_key_values: Any,
         *,
         layer_subset: list[int] | None = None,
+        head_agg: str = "mean",
     ) -> tuple[torch.Tensor, float]:
         """Compute exact mean attention importance `[P]` across hooked layers from cached K & captured Q_tail."""
         t0 = time.perf_counter()
@@ -199,36 +269,7 @@ class TargetPrefillAttentionHook:
 
         acc_importance: torch.Tensor | None = None
         for l_idx in use_layers:
-            h_tail, cos_tail, sin_tail = self._captured[l_idx]
-            attn_mod = self.layers[l_idx].self_attn
-            k_all = _extract_layer_keys(past_key_values, l_idx)  # [B, n_kv, P, D]
-            bsz, n_kv, seq_len, head_dim = k_all.shape
-            w = int(h_tail.shape[1])
-
-            q_proj = attn_mod.q_proj(h_tail).view(bsz, w, -1, head_dim)
-            if hasattr(attn_mod, "q_norm") and attn_mod.q_norm is not None:
-                q_proj = attn_mod.q_norm(q_proj)
-            q_states = q_proj.transpose(1, 2)  # [B, n_q, w, D]
-            # Apply RoPE to tail queries
-            cos_u = cos_tail.unsqueeze(1)
-            sin_u = sin_tail.unsqueeze(1)
-            q_states = (q_states * cos_u) + (_rotate_half(q_states) * sin_u)
-
-            n_q = int(q_states.shape[1])
-            n_rep = max(1, n_q // n_kv)
-            q_grouped = q_states.view(bsz, n_kv, n_rep, w, head_dim)
-            k_grouped = k_all.unsqueeze(2)  # [B, n_kv, 1, P, D]
-            scaling = float(getattr(attn_mod, "scaling", head_dim ** -0.5))
-            scores = torch.matmul(q_grouped, k_grouped.transpose(-2, -1)) * scaling  # [B, n_kv, n_rep, w, P]
-
-            # Causal mask on the W x W bottom-right corner
-            if w > 1:
-                row_idx = torch.arange(seq_len - w, seq_len, device=scores.device).view(1, 1, 1, w, 1)
-                col_idx = torch.arange(seq_len, device=scores.device).view(1, 1, 1, 1, seq_len)
-                scores = scores.masked_fill(col_idx > row_idx, float("-inf"))
-
-            probs = torch.softmax(scores.float(), dim=-1)  # [B, n_kv, n_rep, w, P]
-            layer_imp = probs[0].mean(dim=(0, 1, 2))  # [P]
+            layer_imp = self.compute_layer_token_importance(l_idx, past_key_values, head_agg=head_agg)
             acc_importance = layer_imp if acc_importance is None else (acc_importance + layer_imp)
 
         assert acc_importance is not None
@@ -239,11 +280,29 @@ class TargetPrefillAttentionHook:
         return mean_imp.detach().cpu(), elapsed_s
 
 
+def _aggregate_segment_score(seg: torch.Tensor, agg: str, peak_k: int = 32) -> float:
+    if seg.numel() == 0:
+        return 0.0
+    if agg == "sum":
+        return float(seg.sum().item())
+    if agg == "mean":
+        return float(seg.mean().item())
+    if agg == "sqrt":
+        return float(seg.sum().item() / math.sqrt(float(seg.numel())))
+    if agg == "max":
+        return float(seg.max().item())
+    if agg == "peak":
+        k = min(int(peak_k), int(seg.numel()))
+        return float(torch.topk(seg, k).values.sum().item())
+    raise ValueError(f"Unsupported aggregation={agg!r}")
+
+
 def score_evidence_from_token_importance(
     token_importance: torch.Tensor,
     spans: EvidenceTokenSpans,
     *,
     passage_agg: str = "sum",
+    sentence_agg: str = "sum",
     peak_k: int = 32,
 ) -> tuple[list[float], list[list[float]]]:
     """Aggregate 1D per-token target attention importance into passage & sentence scores."""
@@ -254,19 +313,7 @@ def score_evidence_from_token_importance(
     for s, e in spans.passage_spans:
         s_c = max(0, min(s, n_tok))
         e_c = max(s_c, min(e, n_tok))
-        if e_c <= s_c:
-            passage_scores.append(0.0)
-            continue
-        seg = imp[s_c:e_c]
-        if passage_agg == "sum":
-            passage_scores.append(float(seg.sum().item()))
-        elif passage_agg == "mean":
-            passage_scores.append(float(seg.mean().item()))
-        elif passage_agg == "peak":
-            k = min(int(peak_k), int(seg.numel()))
-            passage_scores.append(float(torch.topk(seg, k).values.sum().item()))
-        else:
-            raise ValueError(f"Unsupported passage_agg={passage_agg!r}")
+        passage_scores.append(_aggregate_segment_score(imp[s_c:e_c], passage_agg, peak_k=peak_k))
 
     sentence_scores_by_passage: list[list[float]] = []
     for s_spans in spans.sentence_spans_by_passage:
@@ -274,10 +321,7 @@ def score_evidence_from_token_importance(
         for s, e in s_spans:
             s_c = max(0, min(s, n_tok))
             e_c = max(s_c, min(e, n_tok))
-            if e_c <= s_c:
-                s_scores.append(0.0)
-            else:
-                s_scores.append(float(imp[s_c:e_c].sum().item()))
+            s_scores.append(_aggregate_segment_score(imp[s_c:e_c], sentence_agg, peak_k=peak_k))
         sentence_scores_by_passage.append(s_scores)
 
     return passage_scores, sentence_scores_by_passage

@@ -48,6 +48,59 @@ def exact_speculative_round(proposals: list[int], q_distributions: list[torch.Te
         if len(statuses)<len(proposals): statuses.extend(["discarded_after_rejection"]*(len(proposals)-len(statuses)))
     return RoundResult(committed,proposals,len([s for s in statuses if s=="accepted"]),None,statuses,None,extra,full)
 
+
+def exact_pld_verify_round(
+    proposed: list[int],
+    p_dists: list[torch.Tensor],
+    *,
+    generator: torch.Generator | None = None,
+    eos_token_id: int | None = None,
+    remaining: int | None = None,
+    target_extra: torch.Tensor | None = None,
+) -> RoundResult:
+    """Lossless residual verification when draft proposal is deterministic one-hot at each token."""
+    if len(proposed) != len(p_dists):
+        raise ValueError("Proposal and distribution lengths differ")
+    statuses = ["discarded_after_rejection"] * len(proposed)
+    committed: list[int] = []
+    limit = len(proposed) if remaining is None else max(0, remaining)
+    for i, token in enumerate(proposed):
+        if i >= limit:
+            break
+        p_i = p_dists[i].to(torch.float64)
+        acc = float(torch.clamp(p_i[token], 0.0, 1.0).item())
+        draw = float(torch.rand((), device=p_dists[i].device, generator=generator).item())
+        if draw < acc:
+            statuses[i] = "accepted"
+            committed.append(token)
+            if token == eos_token_id:
+                return RoundResult(committed, proposed, i + 1, None, statuses, None, None, False)
+            continue
+        statuses[i] = "rejected"
+        p_res = p_i.clone()
+        p_res[token] = 0.0
+        tot = p_res.sum()
+        if tot <= 0:
+            replacement = token
+        else:
+            replacement = sample_distribution(p_res / tot, generator)
+        committed.append(replacement)
+        return RoundResult(committed, proposed, i, i, statuses, replacement, None, False)
+
+    full = len(committed) == min(len(proposed), limit) and limit > 0
+    extra = None
+    if (
+        full
+        and len(proposed) <= limit
+        and target_extra is not None
+        and (eos_token_id is None or not committed or committed[-1] != eos_token_id)
+        and (remaining is None or len(committed) < remaining)
+    ):
+        extra = sample_distribution(target_extra, generator)
+        committed.append(extra)
+    return RoundResult(committed, proposed, sum(1 for s in statuses if s == "accepted"), None, statuses, None, extra, full)
+
+
 def greedy_verify(proposals: list[int], target_greedy: list[int], eos_token_id: int | None = None, max_new_tokens: int | None = None) -> list[int]:
     """Greedy verification: commit matching prefix, then target argmax at divergence."""
     out=[]

@@ -249,6 +249,13 @@ def _build_sentence_budget_evidence(
     return out
 
 
+def _normalize_ev_mode(raw_mode: str | None) -> str:
+    ev_mode = str(raw_mode or "retrieved")
+    if ev_mode in ("retrieved", "oracle_qa", "longbench_qa"):
+        return ev_mode
+    return "oracle_qa" if "oracle" in ev_mode else "retrieved"
+
+
 def build_draft_context_from_scores(
     row: dict[str, Any],
     *,
@@ -266,9 +273,7 @@ def build_draft_context_from_scores(
     """Build draft context from externally supplied zero-leakage scores (e.g. target prefill attention)."""
     claim = str(row.get("claim", ""))
     evidence = list(row.get("evidence") or [])
-    ev_mode = str(row.get("evidence_mode") or "retrieved")
-    if ev_mode not in ("retrieved", "oracle_qa"):
-        ev_mode = "oracle_qa" if "oracle" in ev_mode else "retrieved"
+    ev_mode = _normalize_ev_mode(row.get("evidence_mode"))
     full_chars = sum(len(str(e.get("text", ""))) for e in evidence)
 
     t0 = time.perf_counter()
@@ -377,9 +382,7 @@ def build_draft_context(
 
     claim = str(row.get("claim", ""))
     evidence = list(row.get("evidence") or [])
-    ev_mode = str(row.get("evidence_mode") or "retrieved")
-    if ev_mode not in ("retrieved", "oracle_qa"):
-        ev_mode = "oracle_qa" if "oracle" in ev_mode else "retrieved"
+    ev_mode = _normalize_ev_mode(row.get("evidence_mode"))
 
     full_chars = sum(len(str(e.get("text", ""))) for e in evidence)
     all_ids = [str(e.get("evidence_id", f"E{i+1}")) for i, e in enumerate(evidence)]

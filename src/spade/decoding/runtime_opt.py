@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 
 def _supports_logits_to_keep(model: Any) -> bool:
@@ -143,6 +144,7 @@ class StaticDraftRunner:
                 f"max_cache_len={self.max_cache_len} must be divisible by {self.FLEX_BLOCK_SIZE} for flex_attention BlockMask"
             )
         self.cur_len = 0
+        self.pos_offset = 0
         self.setup_timings = RunnerSetupTimings(mode=mode, max_cache_len=self.max_cache_len)
 
         t0 = time.perf_counter()
@@ -218,7 +220,7 @@ class StaticDraftRunner:
 
     def _update_step_pos(self, pos: int) -> None:
         self._static_cache_position.fill_(pos)
-        self._static_position_ids.fill_(pos)
+        self._static_position_ids.fill_(pos + self.pos_offset)
         if self._flex_kv_num_blocks is not None:
             self._flex_kv_num_blocks.fill_((pos // self.FLEX_BLOCK_SIZE) + 1)
 
@@ -338,6 +340,7 @@ class StaticDraftRunner:
         self.cache.reset()
         self._set_static_cache_len(0)
         self.cur_len = 0
+        self.pos_offset = 0
         self._is_prepared = True
         return self.setup_timings
 
@@ -390,6 +393,7 @@ class StaticDraftRunner:
 
         self.cache.reset()
         self._set_static_cache_len(0)
+        self.pos_offset = 0
         inp = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
         cache_pos = torch.arange(p_len, dtype=torch.long, device=self.device)
         pos_ids = cache_pos.unsqueeze(0)
@@ -412,6 +416,105 @@ class StaticDraftRunner:
         del out, inp, cache_pos, pos_ids
         self.cur_len = p_len
         return logits
+
+    def prefill_kv_sparse(
+        self,
+        prompt_ids: list[int],
+        *,
+        kv_budget: int,
+        sink_tokens: int = 64,
+        recent_tokens: int = 128,
+        obs_window: int = 16,
+        pool_kernel: int = 5,
+    ) -> tuple[torch.Tensor, float, float, int]:
+        """SnapKV/TriForce-style attention-evicted draft KV prefill into fixed StaticCache.
+
+        Preserves original RoPE positions via `self.pos_offset = len(prompt_ids) - kept_len`.
+        Returns `(next_logits, dyn_prefill_s, eviction_s, kept_len)`.
+        """
+        from ..adaptive.target_attention_selector import TargetPrefillAttentionHook, extract_layer_kv
+
+        p_len = len(prompt_ids)
+        if p_len == 0:
+            raise ValueError("prompt_ids must be non-empty")
+        if p_len <= kv_budget:
+            self._sync()
+            t0 = time.perf_counter()
+            logits = self.prefill(prompt_ids)
+            self._sync()
+            return logits, time.perf_counter() - t0, 0.0, p_len
+
+        effective_budget = int(kv_budget)
+        if effective_budget >= self.max_cache_len:
+            raise ValueError(f"kv_budget={effective_budget} exceeds max_cache_len={self.max_cache_len}")
+
+        sink_t = int(sink_tokens)
+        recent_t = int(recent_tokens)
+        if sink_t + recent_t >= effective_budget:
+            sink_t = max(1, effective_budget // 4)
+            recent_t = max(1, effective_budget // 4)
+        n_mid = effective_budget - sink_t - recent_t
+        if n_mid <= 0:
+            raise ValueError(f"kv_budget={effective_budget} leaves no room for middle attention selection")
+
+        backbone = getattr(self.model, "model", self.model)
+        layers = getattr(backbone, "layers", None)
+        if layers is None:
+            raise ValueError("Draft model does not expose `.model.layers` for KV-sparse eviction")
+        n_layers = len(layers)
+        all_layers = list(range(n_layers))
+
+        self.cache.reset()
+        self._set_static_cache_len(0)
+        inp = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+        pre_kwargs: dict[str, Any] = {"input_ids": inp, "use_cache": True}
+        if self._supports_l2k:
+            pre_kwargs["logits_to_keep"] = 1
+
+        self._sync()
+        t_pre0 = time.perf_counter()
+        with TargetPrefillAttentionHook(self.model, layer_indices=all_layers, tail_window=obs_window) as hook:
+            with torch.inference_mode():
+                out = self.model(**pre_kwargs)
+            self._sync()
+            dyn_prefill_s = time.perf_counter() - t_pre0
+
+            next_logits = out.logits[0, -1].float()
+            dyn_cache = out.past_key_values
+            del out, inp
+
+            t_ev0 = time.perf_counter()
+            mid_start = sink_t
+            mid_end = p_len - recent_t
+            mid_len = mid_end - mid_start
+            sink_idx = torch.arange(0, sink_t, device=self.device)
+            recent_idx = torch.arange(mid_end, p_len, device=self.device)
+
+            with torch.inference_mode():
+                for l_idx in all_layers:
+                    layer_imp = hook.compute_layer_token_importance(l_idx, dyn_cache, head_agg="mean")
+                    mid_imp = layer_imp[mid_start:mid_end].view(1, 1, mid_len)
+                    if pool_kernel > 1 and mid_len >= pool_kernel:
+                        mid_imp = F.max_pool1d(
+                            mid_imp, kernel_size=pool_kernel, stride=1, padding=pool_kernel // 2
+                        )
+                    mid_flat = mid_imp.view(-1)[:mid_len]
+                    top_rel = torch.topk(mid_flat, k=n_mid, largest=True, sorted=False).indices + mid_start
+                    keep_idx, _ = torch.sort(torch.cat([sink_idx, top_rel, recent_idx], dim=0))
+
+                    k_src, v_src = extract_layer_kv(dyn_cache, l_idx)
+                    k_dst, v_dst = extract_layer_kv(self.cache, l_idx)
+                    k_dst[:, :, :effective_budget, :].copy_(k_src.index_select(2, keep_idx).to(self.dtype))
+                    v_dst[:, :, :effective_budget, :].copy_(v_src.index_select(2, keep_idx).to(self.dtype))
+
+            del dyn_cache
+            self._sync()
+            eviction_s = time.perf_counter() - t_ev0
+
+        self._set_static_cache_len(effective_budget)
+        self.cur_len = effective_budget
+        self.pos_offset = p_len - effective_budget
+        return next_logits, dyn_prefill_s, eviction_s, effective_budget
 
     def step(self, token_id: int) -> torch.Tensor:
         """Advance 1 token at `self.cur_len` and return float32 next-token logits."""

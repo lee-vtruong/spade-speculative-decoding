@@ -18,7 +18,7 @@ def write_json(path: Path, value): path.write_text(json.dumps(value,ensure_ascii
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--mode",choices=["B0","B0-S","B1","B2","M4","HF","HF-Assisted"],required=True)
+    p.add_argument("--mode",choices=["B0","B0-S","B1","B2","M4","HF","HF-Assisted","PLD"],required=True)
     p.add_argument("--input",type=Path,required=True,help="Prepared benchmark JSONL")
     p.add_argument("--output-root",type=Path,default=Path(os.environ.get("OUTPUT_ROOT","outputs/runs")))
     p.add_argument("--run-id",default=None)
@@ -37,11 +37,15 @@ def main():
     p.add_argument("--order-decay",type=float,default=0.5,help="Higher-order n-gram scaling factor for M4 biasing")
     p.add_argument("--entropy-threshold",type=float,default=2.0,help="Entropy threshold (nats) for sigmoid gating in M4")
     p.add_argument("--max-boost-cap",type=float,default=3.0,help="Upper bound on applied logit boost in M4")
-    p.add_argument("--draft-context-policy",choices=["full","no_evidence","sliding_window","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
+    p.add_argument("--draft-context-policy",choices=["full","no_evidence","sliding_window","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget","kv_sparse"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
     p.add_argument("--draft-top-k",type=int,default=2,help="Evidence passages retained for draft under selective_topk / hybrid_topk_compact")
     p.add_argument("--draft-compact-sentences",type=int,default=1,help="Max claim-salient sentences per evidence passage under compact / hybrid_topk_compact")
     p.add_argument("--draft-compact-chars",type=int,default=160,help="Max characters per evidence passage under compact / hybrid_topk_compact")
     p.add_argument("--draft-budget-chars",type=int,default=8000,help="Total evidence character budget for sentence_budget / target_attn_sentence_budget")
+    p.add_argument("--draft-kv-budget",type=int,default=1776,help="Retained draft KV token budget under kv_sparse policy")
+    p.add_argument("--draft-attn-agg",choices=["sum","mean","sqrt","max"],default="sum",help="Sentence score aggregation for target_attn_sentence_budget")
+    p.add_argument("--draft-attn-layers",choices=["upper50","upper25","middle50","all","last1"],default="upper50",help="Target layer subset for target_attn_sentence_budget")
+    p.add_argument("--draft-attn-head-agg",choices=["mean","max"],default="mean",help="Head aggregation for target_attn_sentence_budget")
     p.add_argument("--draft-min-sentences-per-passage",type=int,default=1,help="Minimum sentences retained per passage under sentence_budget policies (0 disables coverage constraint)")
     p.add_argument("--draft-attn-tail-window",type=int,default=16,help="Target prefill tail query window for target_attn_sentence_budget")
     p.add_argument(
@@ -66,7 +70,7 @@ def main():
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
     if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
     if a.max_boost_cap < 0.0: p.error("--max-boost-cap must be non-negative")
-    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or (a.draft_context_policy not in {"no_evidence"} and a.draft_budget_chars < 256) or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
+    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or (a.draft_context_policy not in {"no_evidence","kv_sparse"} and a.draft_budget_chars < 256) or a.draft_kv_budget < 16 or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
     rows=read_jsonl(a.input)
     if a.limit is not None: rows=rows[:a.limit]
     if not rows: p.error("Input JSONL has no examples")
@@ -85,10 +89,10 @@ def main():
         from spade.paths import project_root
         from spade.instrumentation.trace_writer import TraceWriter
     except ImportError as exc: raise SystemExit(f"Required runtime dependency missing: {exc}") from exc
-    use_flex_draft = (a.draft_runtime != "eager_dynamic") and (a.mode not in {"B0", "B0-S"})
+    use_flex_draft = (a.draft_runtime != "eager_dynamic") and (a.mode not in {"B0", "B0-S", "PLD"})
     pair=QwenPair(
         a.target,
-        None if a.mode in {"B0","B0-S"} else a.draft,
+        None if a.mode in {"B0","B0-S","PLD"} else a.draft,
         local_files_only=True,
         dtype=a.dtype,
         draft_attn_implementation="flex_attention" if use_flex_draft else None,
@@ -105,6 +109,11 @@ def main():
                     max_p_len = max(max_p_len, len(dtok(ser_d, add_special_tokens=False)["input_ids"]))
                 est_budget_p_len = int(a.draft_budget_chars / 2.2) + 512
                 max_p_len = min(max_p_len, est_budget_p_len)
+            elif a.draft_context_policy == "kv_sparse":
+                for row in rows:
+                    ser_d = format_qwen_prompt(dtok, row["prompt"])
+                    max_p_len = max(max_p_len, len(dtok(ser_d, add_special_tokens=False)["input_ids"]))
+                max_p_len = min(max_p_len, a.draft_kv_budget)
             else:
                 for row in rows:
                     dctx_tmp = build_draft_context(
@@ -140,7 +149,7 @@ def main():
         entropy_threshold=a.entropy_threshold,
         max_boost_cap=a.max_boost_cap,
     ) if a.mode == "M4" else None
-    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"draft_context_policy":a.draft_context_policy,"draft_top_k":a.draft_top_k,"draft_compact_sentences":a.draft_compact_sentences,"draft_compact_chars":a.draft_compact_chars,"draft_budget_chars":a.draft_budget_chars,"draft_min_sentences_per_passage":a.draft_min_sentences_per_passage,"draft_attn_tail_window":a.draft_attn_tail_window,"draft_runtime":a.draft_runtime,"draft_max_cache_len":draft_max_cache_len,"distribution_mode":a.distribution_mode,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
+    resolved={"run_id":run_id,"mode":a.mode,"input":str(a.input.resolve()),"target":a.target,"draft":None if a.mode in {"B0","B0-S","PLD"} else a.draft,"dtype":a.dtype,"draft_length":a.draft_length,"max_new_tokens":a.max_new_tokens,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"seed":a.seed,"limit":a.limit,"warmup":a.warmup,"global_warmup":a.global_warmup,"trials":a.trials,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"enable_biasing":enable_biasing,"no_biasing":a.no_biasing,"no_entropy_gating":a.no_entropy_gating,"beta0":0.0 if a.no_biasing else a.beta0,"order_decay":a.order_decay,"entropy_threshold":a.entropy_threshold,"max_boost_cap":a.max_boost_cap,"draft_context_policy":a.draft_context_policy,"draft_top_k":a.draft_top_k,"draft_compact_sentences":a.draft_compact_sentences,"draft_compact_chars":a.draft_compact_chars,"draft_budget_chars":a.draft_budget_chars,"draft_kv_budget":a.draft_kv_budget,"draft_attn_agg":a.draft_attn_agg,"draft_attn_layers":a.draft_attn_layers,"draft_attn_head_agg":a.draft_attn_head_agg,"draft_min_sentences_per_passage":a.draft_min_sentences_per_passage,"draft_attn_tail_window":a.draft_attn_tail_window,"draft_runtime":a.draft_runtime,"draft_max_cache_len":draft_max_cache_len,"distribution_mode":a.distribution_mode,"timings_authoritative":is_kv,"timing_note":"KV-cache decoding with speculative rollback." if is_kv else "No KV cache; full-prefix recompute diagnostic path."}
     write_json(out/"config_resolved.json",resolved)
     env={"python":sys.version,"platform":platform.platform(),"torch":torch.__version__,"cuda":torch.version.cuda,"cuda_available":torch.cuda.is_available(),"transformers":transformers.__version__,"target_revision_or_path":a.target,"draft_revision_or_path":resolved["draft"],"draft_runtime":a.draft_runtime,"distribution_mode":a.distribution_mode,"draft_setup_timings":draft_setup_dict,"git_commit":None,"git_dirty":None}
     try:
@@ -155,17 +164,24 @@ def main():
     writer=TraceWriter(out/"round_traces.jsonl",out/"token_traces.jsonl")
     canonical=[]; trial_rows=[]
     common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg,"enable_biasing":enable_biasing,"distribution_mode":a.distribution_mode}
+    kv_sparse_cfg = {"kv_budget": a.draft_kv_budget} if (a.mode not in {"B0", "B0-S", "PLD"} and a.draft_context_policy == "kv_sparse") else None
     if a.global_warmup > 0:
         wrow = rows[0]
         wev = [e.get("text","") for e in wrow.get("evidence",[])]
-        if a.draft_context_policy == "target_attn_sentence_budget":
-            w_attn_cfg = {"row": wrow, "budget_chars": a.draft_budget_chars, "tail_window": a.draft_attn_tail_window, "min_sentences_per_passage": a.draft_min_sentences_per_passage}
+        if a.mode in {"B0", "B0-S", "PLD"}:
+            w_attn_cfg = None
+            wdraft = None
+        elif a.draft_context_policy == "target_attn_sentence_budget":
+            w_attn_cfg = {"row": wrow, "budget_chars": a.draft_budget_chars, "tail_window": a.draft_attn_tail_window, "min_sentences_per_passage": a.draft_min_sentences_per_passage, "layer_spec": a.draft_attn_layers, "head_agg": a.draft_attn_head_agg, "sentence_agg": a.draft_attn_agg}
+            wdraft = None
+        elif a.draft_context_policy == "kv_sparse":
+            w_attn_cfg = None
             wdraft = None
         else:
             w_attn_cfg = None
             wdraft = build_draft_context(wrow, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars, budget_chars=a.draft_budget_chars, min_sentences_per_passage=a.draft_min_sentences_per_passage, seed=a.seed) if a.draft_context_policy != "full" else None
         for gw in range(a.global_warmup):
-            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev,draft_prompt=wdraft.draft_prompt if wdraft else None,target_attn_selector_cfg=w_attn_cfg)
+            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev,draft_prompt=wdraft.draft_prompt if wdraft else None,target_attn_selector_cfg=w_attn_cfg,kv_sparse_cfg=kv_sparse_cfg)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
@@ -176,12 +192,18 @@ def main():
             evidence_texts=[e.get("text","") for e in row.get("evidence",[])]
             for trial in range(a.trials):
                 trial_run_id=f"{run_id}-trial{trial}"
-                if a.draft_context_policy == "target_attn_sentence_budget":
-                    attn_cfg = {"row": row, "budget_chars": a.draft_budget_chars, "tail_window": a.draft_attn_tail_window, "min_sentences_per_passage": a.draft_min_sentences_per_passage}
+                if a.mode in {"B0", "B0-S", "PLD"}:
+                    dctx = build_draft_context(row, policy="no_evidence" if a.mode == "PLD" else "full")
+                    generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts)
+                elif a.draft_context_policy == "target_attn_sentence_budget":
+                    attn_cfg = {"row": row, "budget_chars": a.draft_budget_chars, "tail_window": a.draft_attn_tail_window, "min_sentences_per_passage": a.draft_min_sentences_per_passage, "layer_spec": a.draft_attn_layers, "head_agg": a.draft_attn_head_agg, "sentence_agg": a.draft_attn_agg}
                     generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts,draft_prompt=None,target_attn_selector_cfg=attn_cfg)
                     dctx = generation.draft_context_result
                     if dctx is None:
                         raise RuntimeError("target_attn_sentence_budget failed to populate generation.draft_context_result")
+                elif a.draft_context_policy == "kv_sparse":
+                    dctx = build_draft_context(row, policy="full")
+                    generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts,kv_sparse_cfg=kv_sparse_cfg)
                 else:
                     dctx = build_draft_context(row, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars, budget_chars=a.draft_budget_chars, min_sentences_per_passage=a.draft_min_sentences_per_passage, seed=a.seed+index)
                     draft_prompt_arg = dctx.draft_prompt if a.draft_context_policy != "full" else None
