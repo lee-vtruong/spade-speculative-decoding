@@ -1,0 +1,20 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccr}
+\toprule
+\textbf{Target / Draft (Ratio)} & \textbf{AR E2E} & \textbf{Full E2E} & \textbf{SPADE E2E (KV)} & \textbf{$\alpha_{\text{eval}}$} & \textbf{$c_{\text{AR}}$ ($\gamma_{\text{ver}}$)} & \textbf{Lev.\ Ideal / $\gamma$-Adj.} & \textbf{Obs.\ Dec.} & \textbf{SPADE $\Delta$ vs.\ AR (95\% CI)} \\
+\midrule
+Qwen3-8B / 0.6B (1:13.3, $N=100$) & 35.31 & 41.54 & 42.37 (-62.7\%) & 77.40\% & 0.149 ($\gamma=1.71$) & 2.00$\times$ / 1.39$\times$ & 1.30$\times$ & +7.06 [+4.63, +10.00]$^*$ \\
+Qwen3-8B / 1.7B (1:4.7, $N=100$) & 34.77 & 40.52 & 42.65 (-62.7\%) & 84.04\% & 0.225 ($\gamma=1.70$) & 1.92$\times$ / 1.40$\times$ & 1.34$\times$ & +7.89 [+5.65, +10.50]$^*$ \\
+Qwen3-8B / 4B (1:2.0, $N=100$) & 36.36 & 33.99 & 36.39 (-62.7\%) & 85.46\% & 0.399 ($\gamma=1.76$) & 1.44$\times$ / 1.11$\times$ & 1.07$\times$ & +0.03 [-1.59, +1.86] \\
+\midrule
+Qwen2.5-7B / 0.5B (1:14.0, $N=300$) & 46.27 & 48.56 & 51.67 (-63.8\%) & 73.98\% & 0.174 ($\gamma=1.69$) & 1.76$\times$ / 1.26$\times$ & 1.18$\times$ & +5.40 [+3.83, +7.20]$^*$ \\
+Llama-3.1-8B / 3.2-1B (1:8.0, $N=300$) & 47.93 & 46.76 & 47.92 (-64.3\%) & 79.35\% & 0.217 ($\gamma=2.21$) & 1.78$\times$ / 1.08$\times$ & 1.02$\times$ & -0.01 [-1.54, +1.74] \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Same-Family Capacity Ratio Sweep (\texttt{Qwen3-8B} + $\{\text{0.6B, 1.7B, 4B}\}$, $N=100$ Stratified Claims) \& Leviathan Cost Analysis:} Holding tokenizer, vocabulary ($151,936$), and target model fixed isolates the joint $(\alpha, c_{\text{AR}}, \gamma_{\text{ver}})$ frontier ($c_{\text{AR}} = t_{\text{draft step}} / t_{\text{AR step}}$, $\gamma_{\text{ver}} = t_{\text{verify}} / t_{\text{AR step}}$; theoretical decode speedup $\frac{1-\alpha^{K+1}}{(1-\alpha)(Kc_{\text{AR}}+\gamma_{\text{ver}})} $). \texttt{Qwen3-1.7B} ($1:4.7$) lifts $\alpha_{\text{eval}}$ to $84.04\%$ at moderate $c_{\text{AR}}=0.225$, sustaining $+7.89\text{ tok/s}$ E2E over AR and widening SPADE's edge over Full-SD ($+2.14\text{ tok/s}$). By \texttt{Qwen3-4B} ($1:2.0$), $\alpha_{\text{eval}}$ saturates ($85.46\%$) while $c_{\text{AR}}=0.399$ compresses the $\gamma$-adjusted ceiling to $1.11\times$, reducing SPADE to AR parity ($+0.03\text{ tok/s}$) while Full-SD trails AR ($-2.37\text{ tok/s}$). Cross-family \texttt{Llama-3} ($1:8$) mirrors \texttt{Qwen3-4B}'s ceiling due to architecture/verification costs rather than parameter ratio alone.}
+\label{tab:qwen3_ratio_sweep}
+\end{table*}

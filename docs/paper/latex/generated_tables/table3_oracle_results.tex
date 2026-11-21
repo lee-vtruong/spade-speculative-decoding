@@ -2,18 +2,23 @@
 \centering
 \small
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{llccccccc}
+\begin{tabular}{llccccccr}
 \toprule
-\textbf{Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Peak GPU VRAM} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E Thpt} & \textbf{$\Delta$ vs. Full (95\% CI)} & \textbf{$p$-value} \\
+\textbf{Protocol / Decoding Method} & \textbf{Context Policy} & \textbf{Mean Draft Tok} & \textbf{Draft KV} & \textbf{$\alpha_{\text{eval}}$ (\%)} & \textbf{Tok/Rnd} & \textbf{E2E Thpt} & \textbf{$\Delta$ vs.\ Full (95\% CI)} & \textbf{$p$-value} \\
 \midrule
-\textbf{B0-S (Target AR)} & Full (Target Only) & — & 15.83 GB & — & 1.000 & \textbf{41.25} & -35.63 [-36.56, -34.63] & $< 10^{-4}$ \\
-\textbf{Baseline Full} & Full $\to$ Full & 338.9 & 17.29 GB & 81.33\% & 3.341 & \textbf{76.88} & — & — \\
-\textbf{BM25 Top-2} & Full $\to$ Top-2 & 276.6 & 17.22 GB & 78.73\% & 3.159 & \textbf{71.06} & -5.82 [-6.77, -4.87] & $< 10^{-4}$ \\
-\textbf{BM25 Sent-B8k} & Full $\to$ Sent B=8k & 337.9 & 17.27 GB & 81.34\% & 3.340 & \textbf{75.48} & -1.40 [-1.71, -1.11] & $< 10^{-4}$ \\
-\textbf{SPADE (Ours)} & Full $\to$ Bypass & \textbf{338.9} & \textbf{17.29 GB} & \textbf{81.33\%} & \textbf{3.341} & \textbf{\textbf{77.61}} & \textbf{+0.73 [+0.34, +1.30]} & \textbf{$< 10^{-4}$} \\
+\multicolumn{9}{l}{\textit{Counterbalanced Per-Claim Randomized Interleaving (Shared StaticDraftRunner, $N=393$)}} \\
+\textbf{Baseline Full (Interleaved)} & Full $\to$ Full & 338.9 & 47.3 MB & 81.33\% & 3.341 & \textbf{77.19} & — & — \\
+\textbf{SPADE Bypass (Interleaved)} & Full $\to$ Bypass & \textbf{338.9} & \textbf{47.3 MB} & \textbf{81.33\%} & \textbf{3.341} & \textbf{77.13} & \textbf{-0.05 [-0.17, +0.03]} & \textbf{0.3000} \\
+\midrule
+\multicolumn{9}{l}{\textit{Sequential Standalone Reference Runs ($N=393$; $+0.73\text{ tok/s}$ between Full and Bypass reflects run-order drift)}} \\
+\textbf{B0-S (Target AR)} & Full (Target Only) & — & — & — & 1.000 & 41.25 & -35.63 [-36.56, -34.63] & $< 10^{-4}$ \\
+\textbf{Baseline Full (Seq.)} & Full $\to$ Full & 338.9 & 47.2 MB & 81.33\% & 3.341 & 76.88 & — & — \\
+\textbf{BM25 Top-2 (Seq.)} & Full $\to$ Top-2 & 276.6 & — & 78.73\% & 3.159 & 71.06 & -5.82 [-6.77, -4.87] & $< 10^{-4}$ \\
+\textbf{BM25 Sent-B8k (Seq.)} & Full $\to$ Sent B=8k & 337.9 & — & 81.34\% & 3.340 & 75.48 & -1.40 [-1.71, -1.11] & $< 10^{-4}$ \\
+\textbf{SPADE Bypass (Seq.)} & Full $\to$ Bypass & 338.9 & 47.2 MB & 81.33\% & 3.341 & 77.61 & +0.73 [+0.34, +1.30] (drift) & $< 10^{-4}$ \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Auxiliary Evaluation on 393 Short-Context Oracle Claims:} Validating the minimal-overhead bypass mechanism. SPADE triggers selection bypass ($C_{\text{draft}} = C_{\text{full}}$) with identical candidate acceptance ($\Delta = 0.0000\text{ pp}$, $p = 1.0000$), avoiding the $-5.82\text{ tok/s}$ throughput drop of passage-dropping methods ($+0.73\text{ tok/s}$ reflects sequential run hardware drift on identical short-context code paths).}
+\caption{\textbf{Auxiliary Evaluation on 393 Short-Context Oracle Claims:} Per-claim 50/50 counterbalanced interleaving removes sequential run-order drift: SPADE triggers selection bypass ($2.45\,\mu\text{s}$/claim, $C_{\text{draft}} = C_{\text{full}}$) with identical acceptance (81.33\%) and E2E parity ($77.13$ vs.\ $77.19\text{ tok/s}$, $\Delta=-0.05$ $[-0.17, +0.03]$, $p=0.3000$). Sequential baselines are shown below for completeness; comparing them confirms $+0.73\text{ tok/s}$ is sequential drift on identical code paths.}
 \label{tab:oracle_results}
 \end{table*}

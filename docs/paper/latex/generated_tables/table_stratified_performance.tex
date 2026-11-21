@@ -4,16 +4,16 @@
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{lccccccccr}
 \toprule
-\textbf{Context Regime} & \textbf{Claims} & \textbf{Mean Context} & \textbf{Draft KV Red.} & \textbf{Agg Thpt (F $\to$ S)} & \textbf{Agg Speedup} & \textbf{Per-Claim Mean (F $\to$ S)} & \textbf{Mean $\Delta$ (95\% CI)} & \textbf{$\alpha_{\text{eval}}$ (F $\to$ S)} & \textbf{$\alpha_{\text{prop}}$ (F $\to$ S)} \\
+\textbf{Context Regime} & \textbf{Claims} & \textbf{Mean Context} & \textbf{Draft Tok Red.} & \textbf{AR tok/s} & \textbf{Agg.\ (F $\to$ S)} & \textbf{$\Delta$ vs.\ AR (95\% CI)} & \textbf{$\Delta$ vs.\ Full (95\% CI)} & \textbf{$\alpha_{\text{eval}}$ (F $\to$ S)} & \textbf{$\alpha_{\text{prop}}$ (F $\to$ S)} \\
 \midrule
-Bypass ($L \le 10\text{k}$) & 127 (42.3\%) & 752.1 tok & 0.0\% & 68.83 $\to$ 69.70 & +1.3\% & 71.52 $\to$ 71.71 & +0.19 [-0.37, +0.89] & 80.84\% $\to$ 80.84\% & 57.86\% $\to$ 57.81\% \\
-Selective ($L > 10\text{k}$) & 173 (57.7\%) & 8,274.7 tok & \textbf{-69.4\%} & 35.00 $\to$ 36.88 & \textbf{+5.4\%} & 39.59 $\to$ 41.16 & \textbf{+1.57 [+1.11, +2.03]$^*$} & 76.93\% $\to$ 77.00\% & 52.38\% $\to$ 52.66\% \\
-Dense ($L \ge 20\text{k}$) & 124 (41.3\%) & 10,111.5 tok & \textbf{-74.4\%} & 31.10 $\to$ 32.97 & \textbf{+6.0\%} & 33.16 $\to$ 34.91 & \textbf{+1.75 [+1.32, +2.18]$^*$} & 76.66\% $\to$ 76.66\% & 51.93\% $\to$ 52.19\% \\
+Bypass ($L \le 10\text{k}$) & 127 (42.3\%) & 752.1 tok & 0.0\% & 41.29 & 68.83 $\to$ 69.70 & \textbf{+28.41 [+26.97, +29.96]$^*$} & +0.88 [-0.18, +2.41] & 80.84\% $\to$ 80.84\% & 57.86\% $\to$ 57.81\% \\
+Selective ($L > 10\text{k}$) & 173 (57.7\%) & 8,274.7 tok & \textbf{-69.4\%} & 33.09 & 35.00 $\to$ \textbf{36.88} & \textbf{+3.78 [+2.66, +5.03]$^*$} & \textbf{+1.88 [+1.46, +2.29]$^*$} & 76.93\% $\to$ 77.00\% & 52.38\% $\to$ 52.66\% \\
+Dense ($L \ge 20\text{k}$) & 124 (41.3\%) & 10,111.5 tok & \textbf{-74.4\%} & 31.56 & 31.10 $\to$ \textbf{32.97} & +1.41 [+0.49, +2.42] & \textbf{+1.87 [+1.46, +2.27]$^*$} & 76.66\% $\to$ 76.66\% & 51.93\% $\to$ 52.19\% \\
 \midrule
-\textbf{Full Test Set} & 300 (100\%) & 5,090.1 tok & \textbf{-65.1\%} & 41.47 $\to$ 43.28 & \textbf{+4.4\%} & 53.11 $\to$ 54.09 & \textbf{+0.98 [+0.62, +1.38]$^*$} & 78.16\% $\to$ 78.20\% & 54.04\% $\to$ 54.21\% \\
+\textbf{Full Test Set} & 300 (100\%) & 5,090.1 tok & \textbf{-65.1\%} & 35.35 & 41.47 $\to$ \textbf{43.28} & \textbf{+7.93 [+6.53, +9.55]$^*$} & \textbf{+1.82 [+1.39, +2.23]$^*$} & 78.16\% $\to$ 78.20\% & 54.04\% $\to$ 54.21\% \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Context-Stratified Efficiency (AVeriTeC Qwen3, tok/s):} Reports aggregate ($\sum \text{tok}/\sum \text{time}$) and per-claim mean throughput. Bypass ($L\le 10\text{k}$) shows parity with Full-SD ($p=0.29$); gains concentrate on long claims ($+5.4\%$ to $+6.0\%$ aggregate, $+1.57$ to $+1.75\text{ tok/s}$ per-claim, $p<10^{-4}$) while preserving $\alpha_{\text{eval}}$ and $\alpha_{\text{prop}}$.}
+\caption{\textbf{Context-Stratified Efficiency on Held-Out AVeriTeC (\texttt{Qwen3-8B/0.6B}, Aggregate $\sum\text{tok}/\sum\text{time}$ in tok/s):} All throughputs and paired claim-cluster bootstrap 95\% CIs ($B=10,000$; $^*$ denotes $p < 0.001$) use the consistent aggregate ratio definition. On long strata ($8.3\text{k}$ and $10.1\text{k}$ mean tokens), SPADE outperforms \textit{both} Target AR ($+3.78$ and $+1.41\text{ tok/s}$, $p=0.0038$ on Dense where Full-SD trails AR at $31.10$ vs.\ $31.56$) and Full-SD ($+1.88$ and $+1.87\text{ tok/s}$, $+5.4\%$ and $+6.0\%$) while preserving $\alpha_{\text{eval}}$ and $\alpha_{\text{prop}}$.}
 \label{tab:stratified_performance}
 \end{table*}

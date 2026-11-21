@@ -1,0 +1,29 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccr}
+\toprule
+\textbf{Context Len} & \textbf{Batch} & \textbf{Full KV / Draft tok/s} & \textbf{SPADE-10k KV / tok/s} & \textbf{SPADE-2k KV / tok/s} & \textbf{Decode Gain (10k / 2k)} \\
+\midrule
+8k (8,192) & 1 & 0.88 GB / 44.0 & 0.28 GB / 51.1 & 0.08 GB / 51.7 & 1.16$\times$ / 1.18$\times$ \\
+ & 4 & 3.52 GB / 134.2 & 1.10 GB / 201.6 & 0.33 GB / 201.9 & 1.50$\times$ / 1.50$\times$ \\
+ & 8 & 7.04 GB / 213.2 & 2.20 GB / 403.7 & 0.66 GB / 401.0 & 1.89$\times$ / 1.88$\times$ \\
+ & 16 & 14.08 GB / 236.5 & 4.40 GB / 606.0 & 1.32 GB / 811.6 & 2.56$\times$ / 3.43$\times$ \\
+ & 32 & \textit{OOM} & 8.81 GB / 715.8 & 2.63 GB / 1597.8 & Feasible (716 / 1598) \\
+ & 64 & \textit{OOM} & 17.62 GB / 824.8 & 5.26 GB / 2213.1 & Feasible (825 / 2213) \\
+\midrule
+16k (16,384) & 1 & 1.75 GB / 25.0 & 0.28 GB / 51.3 & 0.08 GB / 51.4 & 2.05$\times$ / 2.06$\times$ \\
+ & 4 & 7.02 GB / 76.3 & 1.10 GB / 201.3 & 0.33 GB / 200.7 & 2.64$\times$ / 2.63$\times$ \\
+ & 8 & 14.04 GB / 118.5 & 2.20 GB / 402.2 & 0.66 GB / 401.4 & 3.39$\times$ / 3.39$\times$ \\
+ & 16 & \textit{OOM} & 4.40 GB / 605.1 & 1.32 GB / 813.5 & Feasible (605 / 814) \\
+ & 32 & \textit{OOM} & 8.81 GB / 715.6 & 2.63 GB / 1600.5 & Feasible (716 / 1600) \\
+ & 64 & \textit{OOM} & 17.62 GB / 824.9 & 5.26 GB / 2212.5 & Feasible (825 / 2212) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Co-Located 8B+0.6B Max Batch Size on 32\,GB GPU:} $L=8\text{k}$: Full=6 ($29.2\text{ GB}$) $\to$ SPADE-10k=8 ($28.7\text{ GB}$) $\to$ SPADE-2k=10 ($29.9\text{ GB}$); $L=16\text{k}$: Full=3 ($29.2\text{ GB}$) $\to$ SPADE-10k=5 ($30.4\text{ GB}$) $\to$ SPADE-2k=5 ($29.4\text{ GB}$).} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{Multi-Request Batched Serving Memory \& Draft Decode Throughput (\texttt{Qwen3-0.6B}, StaticCache, RTX 5090 32\,GB):} While single-request ($\text{batch}=1$) draft KV fits easily ($0.88\text{--}1.75\text{ GB}$), shared $8$-head GQA causes Full-SD draft KV to hit OOM at $\text{batch}=32$ ($8\text{k}$) and $\text{batch}=16$ ($16\text{k}$). SPADE scales cleanly to $\text{batch}=64$ ($6.96\times$ peak draft throughput for $B=10\text{k}$ and $18.67\times$ for $B=2\text{k}$ vs.\ Full $\text{batch}=8$ at $16\text{k}$) and lifts co-located \texttt{8B+0.6B} max concurrency from $3 \to 5$ ($16\text{k}$) and $6 \to 10$ ($8\text{k}$).}
+\label{tab:batch_serving}
+\end{table*}

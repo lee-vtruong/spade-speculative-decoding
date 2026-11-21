@@ -2,18 +2,18 @@
 \centering
 \small
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lccccccccr}
+\begin{tabular}{lcccccccccr}
 \toprule
-\textbf{Context Len} & \textbf{Target 8B Prefill} & \textbf{Hook (ms / $\Delta$VRAM)} & \textbf{Draft Prefill (F $\to$ S)} & \textbf{Total Prefill (F $\to$ S)} & \textbf{AR tok/s} & \textbf{Full-SD tok/s (VRAM)} & \textbf{SPADE $\alpha_{\text{eval}}$} & \textbf{SPADE tok/s (VRAM)} & \textbf{$\Delta$ vs.\ Full (95\% CI)} \\
+\textbf{Context Len} & \textbf{Target 8B Prefill} & \textbf{Hook (ms / $\Delta$VRAM)} & \textbf{Draft Prefill (F $\to$ S)} & \textbf{Total Prefill (F $\to$ S)} & \textbf{AR tok/s} & \textbf{Full-SD tok/s (VRAM)} & \textbf{SPADE $\alpha_{\text{eval}}$} & \textbf{SPADE tok/s (VRAM)} & \textbf{$\Delta$ vs.\ AR (95\% CI)} & \textbf{$\Delta$ vs.\ Full (95\% CI)} \\
 \midrule
-2k (2,095) & 173.8 ms & 0.00 ms (bypass) & 25.5 $\to$ 25.5 ms & 199 $\to$ 199 (-0.0\%) ms & 39.55 & 63.10 (17.3G) & 77.6\% & \textbf{60.72} (17.3G) & -2.38 [-8.88, +1.74] \\
-4k (4,168) & 352.5 ms & 6.53 ms / 37.8 MB & 48.3 $\to$ 21.6 ms & 401 $\to$ 381 (-5.0\%) ms & 37.15 & 50.32 (17.9G) & 75.6\% & \textbf{50.17} (17.9G) & -0.15 [-2.19, +1.93] \\
-8k (8,218) & 760.2 ms & 9.29 ms / 73.8 MB & 109.2 $\to$ 21.6 ms & 869 $\to$ 791 (-9.0\%) ms & 32.37 & 34.92 (19.4G) & 77.0\% & \textbf{36.26} (19.1G) & +1.34 [+0.07, +2.63] \\
-16k (16,442) & 1723.1 ms & 16.47 ms / 145.4 MB & 299.9 $\to$ 21.6 ms & 2023 $\to$ 1761 (-12.9\%) ms & 25.96 & 21.30 (22.2G) & 78.7\% & \textbf{23.43} (21.0G) & +2.13 [+1.43, +2.87] \\
-32k (32,839) & 4189.4 ms & 30.89 ms / 291.0 MB & 904.0 $\to$ 21.6 ms & 5093 $\to$ 4242 (-16.7\%) ms & 15.66 & OOM & 78.1\% & \textbf{11.88} (24.8G) & Full OOM \\
+2k (2,095) & 173.8 ms & 0.00 ms (bypass) & 25.5 $\to$ 25.5 ms & 199 $\to$ 199 (-0.0\%) ms & 39.55 & 63.10 (17.3G) & 77.6\% & \textbf{60.72} (17.3G) & +21.17 [+14.88, +25.84] & -2.38 [-8.88, +1.74] \\
+4k (4,168) & 352.5 ms & 6.53 ms / 37.8 MB & 48.3 $\to$ 21.6 ms & 401 $\to$ 381 (-5.0\%) ms & 37.15 & 50.32 (17.9G) & 75.6\% & \textbf{50.17} (17.9G) & +13.01 [+11.13, +15.01] & -0.15 [-2.19, +1.93] \\
+8k (8,218) & 760.2 ms & 9.29 ms / 73.8 MB & 109.2 $\to$ 21.6 ms & 869 $\to$ 791 (-9.0\%) ms & 32.37 & 34.92 (19.4G) & 77.0\% & \textbf{36.26} (19.1G) & +3.90 [+2.60, +5.30] & +1.34 [+0.07, +2.63] \\
+16k (16,442) & 1723.1 ms & 16.47 ms / 145.4 MB & 299.9 $\to$ 21.6 ms & 2023 $\to$ 1761 (-12.9\%) ms & 25.96 & 21.30 (22.2G) & 78.7\% & \textbf{23.43} (21.0G) & -2.53 [-3.48, -1.53] & +2.13 [+1.43, +2.87] \\
+32k (32,839) & 4189.4 ms & 30.89 ms / 291.0 MB & 904.0 $\to$ 21.6 ms & 5093 $\to$ 4242 (-16.7\%) ms & 15.66 & OOM & 78.1\% & \textbf{11.88} (24.8G) & -3.78 [-4.41, -3.18] & Full OOM \\
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\% CIs ($B=10,000$). At 2k, \texttt{StaticCache} capacities match identically and SPADE triggers bypass. Standalone forced-hook overhead at 2k is 6.37 ms. After 4-way Holm correction across 2k--16k, SPADE outperforms Full-SD significantly at 16k ($p_{\text{Holm}}=0.0000$) while 8k raw $p=0.041$ adjusts to $p_{\text{Holm}}=0.123$; Target AR leads at 16k--32k as target prefill and KV verification dominate.}
+\caption{\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with $\ge 1,500$-char held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\% CIs ($B=10,000$). At 2k, \texttt{StaticCache} capacities match identically and SPADE triggers bypass (inconclusive vs.\ Full-SD given wide CI $[-8.88, +1.74]$). Standalone forced-hook overhead at 2k is 6.37 ms. After 5-way Holm correction vs.\ Target AR across 2k--32k, SPADE significantly beats AR at 2k, 4k, and 8k (all $p_{\text{Holm}} < 10^{-4}$) and trails AR at 16k--32k ($p_{\text{Holm}} < 10^{-4}$). After 4-way Holm correction vs.\ Full-SD across 2k--16k, SPADE significantly beats Full-SD at 16k ($p_{\text{Holm}} < 10^{-4}$) while 8k raw $p=0.041$ adjusts to $p_{\text{Holm}}=0.123$.}
 \label{tab:long_context_scaling}
 \end{table*}

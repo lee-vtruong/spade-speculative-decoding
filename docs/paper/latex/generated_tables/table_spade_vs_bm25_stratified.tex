@@ -1,0 +1,27 @@
+\begin{table*}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccr}
+\toprule
+\textbf{Stratum} & \textbf{Claims (Prefixes)} & \textbf{BM25 $1-\text{TV}$} & \textbf{SPADE $1-\text{TV}$} & \textbf{Fixed $\Delta$ (95\% CI)} & \textbf{Fixed $p$} & \textbf{Live $\Delta\alpha$ ($p$) / $\Delta\text{tok/s}$ ($p$)} \\
+\midrule
+\multicolumn{7}{l}{\textit{AVeriTeC Long-173 ($N=173$, $19,259$ fixed Target-AR prefixes; Stratified by Query--Evidence Lexical Overlap \& Length)}} \\
+All Long-173 Claims & 173 (19,259) & 76.99\% & 77.54\% & +0.55 [+0.23, +0.86] & 0.0004 & +1.34 pp (0.0018) / +0.73 (0.0046) \\
+Low Claim--Ev. Recall (Bot-33\%, $\le 0.69$) & 57 (5,551) & 77.64\% & 78.89\% & +1.24 [+0.69, +1.84] & $< 10^{-4}$ & +2.18 pp (0.0042) / +1.62 (0.0008) \\
+High Claim--Ev. Recall (Top-33\%, $\ge 0.90$) & 59 (7,241) & 76.21\% & 76.70\% & +0.49 [+0.03, +0.97] & 0.0344 & +1.46 pp (0.0478) / +0.08 (0.8368) \\
+Low Sent. Jaccard (Bot-33\%, $\le 0.092$) & 57 (5,528) & 77.92\% & 78.91\% & +0.99 [+0.49, +1.54] & $< 10^{-4}$ & +1.66 pp (0.0502) / +1.35 (0.0254) \\
+High Sent. Jaccard (Top-33\%, $\ge 0.153$) & 58 (7,252) & 76.55\% & 76.97\% & +0.42 [-0.08, +0.94] & 0.0958 & +0.32 pp (0.6288) / +0.37 (0.3850) \\
+Low Max Sent. Q-Recall (Bot-33\%, $\le 0.29$) & 61 (5,954) & 77.65\% & 78.82\% & +1.17 [+0.65, +1.74] & $< 10^{-4}$ & +2.51 pp (0.0008) / +1.83 (0.0004) \\
+Ultra-Long Context ($> 32.5\text{k}$ chars, High) & 86 (10,101) & 76.35\% & 77.12\% & +0.76 [+0.36, +1.18] & $< 10^{-4}$ & +1.46 pp (0.0204) / +0.63 (0.0188) \\
+\midrule
+\multicolumn{7}{l}{\textit{LongBench HotpotQA ($N=100$, $7,766$ fixed prefixes; High Lexical Overlap, Median Claim--Ev. Recall $=1.000$)}} \\
+All HotpotQA Claims & 100 (7,766) & 73.52\% & 74.15\% & +0.63 [-0.40, +1.67] & 0.2314 & +1.43 pp (0.0776) / +0.11 (0.6896) \\
+Low Top-5 Sent. Jaccard ($\le 0.201$) & 50 (4,072) & 71.99\% & 72.70\% & +0.71 [-0.93, +2.36] & 0.4010 & — \\
+High Top-5 Sent. Jaccard ($> 0.201$) & 50 (3,694) & 75.21\% & 75.76\% & +0.55 [-0.57, +1.79] & 0.3502 & — \\
+\bottomrule
+\end{tabular}%
+}
+\caption{\textbf{When Does Target-Prefill Attention Outperform Lexical BM25? (Deterministic Fixed-Prefix \& Live-Rollout Stratification):} Across $19,259$ shared Target-AR prefixes on \texttt{Long-173}, SPADE's advantage concentrates sharply on low lexical-overlap queries (Bot-33\% claim--evidence recall: $+1.24\text{ pp}$, $p < 10^{-4}$; live $+1.62\text{ tok/s}$, $p = 0.0008$) and longest contexts ($> 32.5\text{k}$ chars: $+0.76\text{ pp}$, $p < 10^{-4}$). Conversely, on high-overlap AVeriTeC claims and keyword-anchored HotpotQA (median claim recall $1.000$), zero-GPU \texttt{BM25 Sent-B10k} matches SPADE.}
+\label{tab:spade_vs_bm25_stratified}
+\end{table*}
