@@ -48,7 +48,7 @@ def _fmt_p_holm_eq(p: float) -> str:
 
 def _compute_sel173_live_overall() -> dict[str, Any] | None:
     """Compute aggregate live SPADE vs BM25 contrast on Long-173 (b1-4 Sel-173 cohort)."""
-    l173_path = Path("data/processed/averitec_long173.jsonl")
+    l173_path = Path("outputs/benchmarks/retrieved-heldout-long173.jsonl")
     sp_path = RUNS_DIR / "b1-4-heldout300-attn-sent-b10k" / "predictions.jsonl"
     bm_path = RUNS_DIR / "b1-4-heldout300-bm25-sent-b10k" / "predictions.jsonl"
     if not (l173_path.exists() and sp_path.exists() and bm_path.exists()):
