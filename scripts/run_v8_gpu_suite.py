@@ -236,6 +236,50 @@ def run_batch_block() -> None:
     n_kvh = int(getattr(cfg, "num_key_value_heads", cfg.num_attention_heads))
     hd = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
     supports_l2k = "logits_to_keep" in draft.forward.__code__.co_varnames if hasattr(draft.forward, "__code__") else True
+    s_zero = torch.tensor(0.0, dtype=torch.bfloat16, device="cuda")
+    s_neg = torch.tensor(torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16, device="cuda")
+
+    def _probe_standalone(bs: int, kv_tok: int, max_cache_len: int) -> tuple[float, float, float, float]:
+        cache = StaticCache(config=cfg, max_cache_len=max_cache_len)
+        cache.early_initialization(batch_size=bs, num_heads=n_kvh, head_dim=hd, dtype=torch.bfloat16, device=torch.device("cuda"))
+        kv_bytes = _cache_kv_bytes(cache)
+        inp_step = torch.ones((bs, 1), dtype=torch.long, device="cuda")
+        arange_k = torch.arange(max_cache_len, dtype=torch.long, device="cuda").view(1, 1, 1, -1)
+        for s_idx in range(5):
+            pos = kv_tok + s_idx
+            cpos = torch.tensor([pos], dtype=torch.long, device="cuda")
+            pids = torch.full((bs, 1), pos, dtype=torch.long, device="cuda")
+            amask = torch.where(arange_k <= cpos.view(1, 1, 1, 1), s_zero, s_neg)
+            kw: dict[str, Any] = {
+                "input_ids": inp_step, "attention_mask": amask, "past_key_values": cache,
+                "cache_position": cpos, "position_ids": pids, "use_cache": True,
+            }
+            if supports_l2k:
+                kw["logits_to_keep"] = 1
+            with torch.inference_mode():
+                _ = draft(**kw)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        n_steps = 32
+        for s_idx in range(n_steps):
+            pos = kv_tok + 5 + s_idx
+            cpos = torch.tensor([pos], dtype=torch.long, device="cuda")
+            pids = torch.full((bs, 1), pos, dtype=torch.long, device="cuda")
+            amask = torch.where(arange_k <= cpos.view(1, 1, 1, 1), s_zero, s_neg)
+            kw = {
+                "input_ids": inp_step, "attention_mask": amask, "past_key_values": cache,
+                "cache_position": cpos, "position_ids": pids, "use_cache": True,
+            }
+            if supports_l2k:
+                kw["logits_to_keep"] = 1
+            with torch.inference_mode():
+                _ = draft(**kw)
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
+        step_ms = (dt / n_steps) * 1000.0
+        agg_tok_s = (bs * n_steps) / dt
+        peak_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+        return kv_bytes / (1024.0 ** 3), peak_gb, step_ms, agg_tok_s
 
     standalone_rows = []
     policies = [("Full Context", None), ("SPADE B=10k", 2529), ("SPADE B=2k", 722)]
@@ -244,76 +288,59 @@ def run_batch_block() -> None:
             kv_tok = ctx_len if fixed_tok is None else fixed_tok
             max_cache_len = kv_tok + 48
             for bs in (1, 4, 8, 16, 32, 64):
-                cache = None
+                _cleanup_cuda()
+                torch.cuda.reset_peak_memory_stats()
                 try:
-                    _cleanup_cuda()
-                    torch.cuda.reset_peak_memory_stats()
-                    cache = StaticCache(config=cfg, max_cache_len=max_cache_len)
-                    cache.early_initialization(batch_size=bs, num_heads=n_kvh, head_dim=hd, dtype=torch.bfloat16, device=torch.device("cuda"))
-                    kv_bytes = _cache_kv_bytes(cache)
-                    inp_step = torch.ones((bs, 1), dtype=torch.long, device="cuda")
-                    arange_k = torch.arange(max_cache_len, dtype=torch.long, device="cuda").view(1, 1, 1, -1)
-                    mask_zero = torch.tensor(0.0, dtype=torch.bfloat16, device="cuda")
-                    mask_neg = torch.tensor(torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16, device="cuda")
-
-                    for s_idx in range(5):
-                        pos = kv_tok + s_idx
-                        cpos = torch.tensor([pos], dtype=torch.long, device="cuda")
-                        pids = torch.full((bs, 1), pos, dtype=torch.long, device="cuda")
-                        amask = torch.where(arange_k <= cpos.view(1, 1, 1, 1), mask_zero, mask_neg)
-                        kw: dict[str, Any] = {
-                            "input_ids": inp_step, "attention_mask": amask, "past_key_values": cache,
-                            "cache_position": cpos, "position_ids": pids, "use_cache": True,
-                        }
-                        if supports_l2k:
-                            kw["logits_to_keep"] = 1
-                        with torch.inference_mode():
-                            _ = draft(**kw)
-                    torch.cuda.synchronize()
-                    t0 = time.perf_counter()
-                    n_steps = 32
-                    for s_idx in range(n_steps):
-                        pos = kv_tok + 5 + s_idx
-                        cpos = torch.tensor([pos], dtype=torch.long, device="cuda")
-                        pids = torch.full((bs, 1), pos, dtype=torch.long, device="cuda")
-                        amask = torch.where(arange_k <= cpos.view(1, 1, 1, 1), mask_zero, mask_neg)
-                        kw = {
-                            "input_ids": inp_step, "attention_mask": amask, "past_key_values": cache,
-                            "cache_position": cpos, "position_ids": pids, "use_cache": True,
-                        }
-                        if supports_l2k:
-                            kw["logits_to_keep"] = 1
-                        with torch.inference_mode():
-                            _ = draft(**kw)
-                    torch.cuda.synchronize()
-                    dt = time.perf_counter() - t0
-                    step_ms = (dt / n_steps) * 1000.0
-                    agg_tok_s = (bs * n_steps) / dt
-                    peak_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+                    kv_gb, peak_gb, step_ms, agg_tok_s = _probe_standalone(bs, kv_tok, max_cache_len)
                     standalone_rows.append({
                         "context_len": ctx_len, "policy": pol_name, "kv_slots": kv_tok,
                         "max_cache_len": max_cache_len, "batch_size": bs, "oom": False,
-                        "draft_kv_gb": round(kv_bytes / (1024.0 ** 3), 3),
+                        "draft_kv_gb": round(kv_gb, 3),
                         "peak_vram_gb": round(peak_gb, 2),
                         "step_ms": round(step_ms, 2),
                         "draft_decode_tok_s": round(agg_tok_s, 1),
                     })
-                    print(f"  [standalone L={ctx_len} {pol_name:12s} bs={bs:2d}] KV={kv_bytes/(1024**3):.2f}GB peak={peak_gb:.2f}GB step={step_ms:.2f}ms tok/s={agg_tok_s:.1f}", flush=True)
+                    print(f"  [standalone L={ctx_len} {pol_name:12s} bs={bs:2d}] KV={kv_gb:.2f}GB peak={peak_gb:.2f}GB step={step_ms:.2f}ms tok/s={agg_tok_s:.1f}", flush=True)
                 except torch.OutOfMemoryError:
                     standalone_rows.append({
                         "context_len": ctx_len, "policy": pol_name, "kv_slots": kv_tok,
                         "max_cache_len": max_cache_len, "batch_size": bs, "oom": True,
                     })
                     print(f"  [standalone L={ctx_len} {pol_name:12s} bs={bs:2d}] OOM", flush=True)
-                finally:
-                    del cache
                     _cleanup_cuda()
+                    break
+                _cleanup_cuda()
 
     # Co-located 8B Target + 0.6B Draft concurrency probe on 32 GB RTX 5090
     target = AutoModelForCausalLM.from_pretrained(QWEN3_8B_SNAP, dtype=torch.bfloat16, device_map="cuda", local_files_only=True).eval()
     t_cfg = target.config
     t_kvh = int(getattr(t_cfg, "num_key_value_heads", t_cfg.num_attention_heads))
     t_hd = int(getattr(t_cfg, "head_dim", t_cfg.hidden_size // t_cfg.num_attention_heads))
+    m_zero = torch.tensor(0.0, dtype=torch.bfloat16, device="cuda")
+    m_neg = torch.tensor(torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16, device="cuda")
+
+    def _probe_coloc(bs: int, ctx_len: int, d_tok: int, t_cap: int, d_cap: int) -> tuple[float, float, float]:
+        t_cache = StaticCache(config=t_cfg, max_cache_len=t_cap)
+        t_cache.early_initialization(batch_size=bs, num_heads=t_kvh, head_dim=t_hd, dtype=torch.bfloat16, device=torch.device("cuda"))
+        d_cache = StaticCache(config=cfg, max_cache_len=d_cap)
+        d_cache.early_initialization(batch_size=bs, num_heads=n_kvh, head_dim=hd, dtype=torch.bfloat16, device=torch.device("cuda"))
+        d_in = torch.ones((bs, 1), dtype=torch.long, device="cuda")
+        t_in = torch.ones((bs, 5), dtype=torch.long, device="cuda")
+        dcpos = torch.tensor([d_tok], dtype=torch.long, device="cuda")
+        tcpos = torch.arange(ctx_len, ctx_len + 5, dtype=torch.long, device="cuda")
+        d_arange = torch.arange(d_cap, dtype=torch.long, device="cuda").view(1, 1, 1, -1)
+        t_arange = torch.arange(t_cap, dtype=torch.long, device="cuda").view(1, 1, 1, -1)
+        d_amask = torch.where(d_arange <= dcpos.view(1, 1, 1, 1), m_zero, m_neg)
+        t_amask = torch.where(t_arange <= tcpos.view(1, 1, 5, 1), m_zero, m_neg)
+        with torch.inference_mode():
+            _ = draft(input_ids=d_in, attention_mask=d_amask, past_key_values=d_cache, cache_position=dcpos, use_cache=True, logits_to_keep=1)
+            _ = target(input_ids=t_in, attention_mask=t_amask, past_key_values=t_cache, cache_position=tcpos, use_cache=True, logits_to_keep=1)
+        torch.cuda.synchronize()
+        t_kv_gb = _cache_kv_bytes(t_cache) / (1024.0 ** 3)
+        d_kv_gb = _cache_kv_bytes(d_cache) / (1024.0 ** 3)
+        peak_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+        return t_kv_gb, d_kv_gb, peak_gb
+
     coloc_rows = []
     max_concurrency: dict[str, dict[str, int]] = {}
     for ctx_len in (8192, 16384):
@@ -324,26 +351,10 @@ def run_batch_block() -> None:
             d_cap = d_tok + 48
             best_bs = 0
             for bs in (1, 2, 3, 4, 5, 6, 8, 10, 12, 16):
-                t_cache = d_cache = None
+                _cleanup_cuda()
+                torch.cuda.reset_peak_memory_stats()
                 try:
-                    _cleanup_cuda()
-                    torch.cuda.reset_peak_memory_stats()
-                    t_cache = StaticCache(config=t_cfg, max_cache_len=t_cap)
-                    t_cache.early_initialization(batch_size=bs, num_heads=t_kvh, head_dim=t_hd, dtype=torch.bfloat16, device=torch.device("cuda"))
-                    d_cache = StaticCache(config=cfg, max_cache_len=d_cap)
-                    d_cache.early_initialization(batch_size=bs, num_heads=n_kvh, head_dim=hd, dtype=torch.bfloat16, device=torch.device("cuda"))
-                    # Execute 1 real verification step + 1 draft step to include runtime workspace
-                    d_in = torch.ones((bs, 1), dtype=torch.long, device="cuda")
-                    t_in = torch.ones((bs, 5), dtype=torch.long, device="cuda")
-                    dcpos = torch.tensor([d_tok], dtype=torch.long, device="cuda")
-                    tcpos = torch.arange(ctx_len, ctx_len + 5, dtype=torch.long, device="cuda")
-                    with torch.inference_mode():
-                        _ = draft(input_ids=d_in, past_key_values=d_cache, cache_position=dcpos, use_cache=True, logits_to_keep=1)
-                        _ = target(input_ids=t_in, past_key_values=t_cache, cache_position=tcpos, use_cache=True, logits_to_keep=1)
-                    torch.cuda.synchronize()
-                    t_kv_gb = _cache_kv_bytes(t_cache) / (1024.0 ** 3)
-                    d_kv_gb = _cache_kv_bytes(d_cache) / (1024.0 ** 3)
-                    peak_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+                    t_kv_gb, d_kv_gb, peak_gb = _probe_coloc(bs, ctx_len, d_tok, t_cap, d_cap)
                     best_bs = bs
                     coloc_rows.append({
                         "context_len": ctx_len, "policy": pol_name, "batch_size": bs, "oom": False,
@@ -356,10 +367,9 @@ def run_batch_block() -> None:
                         "context_len": ctx_len, "policy": pol_name, "batch_size": bs, "oom": True,
                     })
                     print(f"  [coloc L={ctx_len} {pol_name:12s} bs={bs:2d}] OOM", flush=True)
-                    break
-                finally:
-                    del t_cache, d_cache
                     _cleanup_cuda()
+                    break
+                _cleanup_cuda()
             max_concurrency[str(ctx_len)][pol_name] = best_bs
 
     report = {
