@@ -555,12 +555,20 @@ def export_qwen3_ratio_table(q3_sweep: dict[str, Any] | None, v6_master: dict[st
             f"{lm3_sp['leviathan_ideal_decode_x']:.2f}$\\times$ / {lm3_sp['leviathan_gamma_adjusted_x']:.2f}$\\times$ & "
             f"{lm3_sp['observed_decode_x_vs_ar']:.2f}$\\times$ & {ci_l_s} \\\\"
         )
+    m17 = q3_sweep["models"].get("Qwen3-1.7B", {})
+    m4b = q3_sweep["models"].get("Qwen3-4B", {})
+    cap_dyn = (
+        f"\\texttt{{Qwen3-1.7B}} ($1:4.7$) lifts $\\alpha_{{\\text{{eval}}}}$ to ${m17['SPADE']['alpha_eval_pct']:.2f}\\%$ at moderate $c_{{\\text{{AR}}}}={m17['SPADE']['c_ar']:.3f}$, sustaining ${m17['spade_vs_ar']['e2e_tok_s']['delta']:+.2f}\\text{{ tok/s}}$ E2E over AR and widening SPADE's edge over Full-SD (${m17['spade_vs_full']['e2e_tok_s']['delta']:+.2f}\\text{{ tok/s}}$). "
+        f"By \\texttt{{Qwen3-4B}} ($1:2.0$), $\\alpha_{{\\text{{eval}}}}$ saturates (${m4b['SPADE']['alpha_eval_pct']:.2f}\\%$) while $c_{{\\text{{AR}}}}={m4b['SPADE']['c_ar']:.3f}$ compresses the $\\gamma$-adjusted ceiling to ${m4b['SPADE']['leviathan_gamma_adjusted_x']:.2f}\\times$, reducing SPADE to AR parity (${m4b['spade_vs_ar']['e2e_tok_s']['delta']:+.2f}\\text{{ tok/s}}$) while Full-SD trails AR (${m4b['full_vs_ar']['e2e_tok_s']['delta']:+.2f}\\text{{ tok/s}}$)."
+        if m17 and m4b
+        else ""
+    )
     tex = (
         "\\begin{table*}[t]\n\\centering\n\\small\n\\resizebox{\\textwidth}{!}{%\n"
         "\\begin{tabular}{lcccccccr}\n\\toprule\n"
         "\\textbf{Target / Draft (Ratio)} & \\textbf{AR E2E} & \\textbf{Full E2E} & \\textbf{SPADE E2E (KV)} & \\textbf{$\\alpha_{\\text{eval}}$} & \\textbf{$c_{\\text{AR}}$ ($\\gamma_{\\text{ver}}$)} & \\textbf{Lev.\\ Ideal / $\\gamma$-Adj.} & \\textbf{Obs.\\ Dec.} & \\textbf{SPADE $\\Delta$ vs.\\ AR (95\\% CI)} \\\\\n"
         "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-        "\\caption{\\textbf{Same-Family Capacity Ratio Sweep (\\texttt{Qwen3-8B} + $\\{\\text{0.6B, 1.7B, 4B}\\}$, $N=100$ Stratified Claims) \\& Leviathan Cost Analysis:} Holding tokenizer, vocabulary ($151,936$), and target model fixed isolates the draft-to-target cost ratio $c_{\\text{AR}} = t_{\\text{draft step}} / t_{\\text{AR step}}$ alongside verification latency inflation $\\gamma_{\\text{ver}} = t_{\\text{verify}} / t_{\\text{AR step}}$. Theoretical decode speedup $\\frac{1-\\alpha^{K+1}}{(1-\\alpha)(Kc_{\\text{AR}}+\\gamma_{\\text{ver}})}$ closely predicts observed decode acceleration and explains why $1:8$ (Llama-3) and $1:4.7$--$1:2.0$ drafters lose net E2E speedup over Target AR.}\n"
+        f"\\caption{{\\textbf{{Same-Family Capacity Ratio Sweep (\\texttt{{Qwen3-8B}} + $\\{{\\text{{0.6B, 1.7B, 4B}}\\}}$, $N=100$ Stratified Claims) \\& Leviathan Cost Analysis:}} Holding tokenizer, vocabulary ($151,936$), and target model fixed isolates the joint $(\\alpha, c_{{\\text{{AR}}}}, \\gamma_{{\\text{{ver}}}})$ frontier ($c_{{\\text{{AR}}}} = t_{{\\text{{draft step}}}} / t_{{\\text{{AR step}}}}$, $\\gamma_{{\\text{{ver}}}} = t_{{\\text{{verify}}}} / t_{{\\text{{AR step}}}}$; theoretical decode speedup $\\frac{{1-\\alpha^{{K+1}}}}{{(1-\\alpha)(Kc_{{\\text{{AR}}}}+\\gamma_{{\\text{{ver}}}})}} $). {cap_dyn} Cross-family \\texttt{{Llama-3}} ($1:8$) mirrors \\texttt{{Qwen3-4B}}'s ceiling due to architecture/verification costs rather than parameter ratio alone.}}\n"
         "\\label{tab:qwen3_ratio_sweep}\n\\end{table*}\n"
     )
     (TABLES_DIR / "table_qwen3_ratio_sweep.tex").write_text(tex, encoding="utf-8")
