@@ -54,6 +54,18 @@ CACHE_DIR = "/home/stackops/whale/cache/huggingface/hub"
 QWEN3_8B_SNAP = f"{CACHE_DIR}/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
 QWEN3_06B_SNAP = f"{CACHE_DIR}/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
 
+
+def _resolve_cached_snapshot(repo_id: str) -> str:
+    """Resolve local HF cache snapshot without failing on excluded non-weight files."""
+    snap_root = Path(CACHE_DIR) / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    if snap_root.exists():
+        for cand in sorted(snap_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if cand.is_dir() and (cand / "config.json").exists():
+                return str(cand)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id, cache_dir=CACHE_DIR)
+
 REV9_DIR = Path("outputs/analysis/v9_revisions")
 HELD300_PATH = Path("outputs/benchmarks/retrieved-heldout300.jsonl")
 LONG173_PATH = Path("outputs/benchmarks/retrieved-heldout-long173.jsonl")
@@ -552,8 +564,6 @@ def _check_model_flex_exactness(model_snap: str, label: str) -> dict[str, Any]:
 
 
 def run_target_opt_profile_block() -> None:
-    from huggingface_hub import snapshot_download
-
     print("\n=== [BLOCK: target_opt_profile] Roofline, Exactness & Eager vs Compiled Profile ===", flush=True)
     # 1) Measure RTX 5090 sustained D2D HBM copy bandwidth
     buf_a = torch.empty((1024 * 1024 * 256,), dtype=torch.bfloat16, device="cuda")
@@ -573,8 +583,8 @@ def run_target_opt_profile_block() -> None:
     _cleanup_cuda()
 
     # 2) Numerical exactness + compatibility checks across Qwen3-8B, Qwen2.5-7B, Llama-3.1-8B
-    q25_8b_snap = snapshot_download("Qwen/Qwen2.5-7B-Instruct", cache_dir=CACHE_DIR, local_files_only=True)
-    lm3_8b_snap = snapshot_download("unsloth/Meta-Llama-3.1-8B-Instruct", cache_dir=CACHE_DIR, local_files_only=True)
+    q25_8b_snap = _resolve_cached_snapshot("Qwen/Qwen2.5-7B-Instruct")
+    lm3_8b_snap = _resolve_cached_snapshot("unsloth/Meta-Llama-3.1-8B-Instruct")
     exactness = {
         "Qwen3-8B": _check_model_flex_exactness(QWEN3_8B_SNAP, "Qwen3-8B"),
         "Qwen2.5-7B": _check_model_flex_exactness(q25_8b_snap, "Qwen2.5-7B"),
@@ -1085,8 +1095,6 @@ def _eval_model_pair_compiled(
 
 
 def run_ratio_and_cross_family_block() -> None:
-    from huggingface_hub import snapshot_download
-
     print("\n=== [BLOCK: ratio_and_cross_family] Optimized Capacity Ratio & Cross-Family Evaluation ===", flush=True)
     rows100 = _stratified_heldout100()
     rows300 = _load_jsonl(HELD300_PATH)
@@ -1095,19 +1103,19 @@ def run_ratio_and_cross_family_block() -> None:
 
     specs = [
         ("Qwen3-8B / 0.6B", QWEN3_8B_SNAP, QWEN3_06B_SNAP, "1:13.3", rows100),
-        ("Qwen3-8B / 1.7B", QWEN3_8B_SNAP, snapshot_download("Qwen/Qwen3-1.7B", cache_dir=CACHE_DIR, local_files_only=True), "1:4.7", rows100),
-        ("Qwen3-8B / 4B", QWEN3_8B_SNAP, snapshot_download("Qwen/Qwen3-4B", cache_dir=CACHE_DIR, local_files_only=True), "1:2.0", rows100),
+        ("Qwen3-8B / 1.7B", QWEN3_8B_SNAP, _resolve_cached_snapshot("Qwen/Qwen3-1.7B"), "1:4.7", rows100),
+        ("Qwen3-8B / 4B", QWEN3_8B_SNAP, _resolve_cached_snapshot("Qwen/Qwen3-4B"), "1:2.0", rows100),
         (
             "Qwen2.5-7B / 0.5B",
-            snapshot_download("Qwen/Qwen2.5-7B-Instruct", cache_dir=CACHE_DIR, local_files_only=True),
-            snapshot_download("Qwen/Qwen2.5-0.5B-Instruct", cache_dir=CACHE_DIR, local_files_only=True),
+            _resolve_cached_snapshot("Qwen/Qwen2.5-7B-Instruct"),
+            _resolve_cached_snapshot("Qwen/Qwen2.5-0.5B-Instruct"),
             "1:14.0",
             rows300,
         ),
         (
             "Llama-3.1-8B / 3.2-1B",
-            snapshot_download("unsloth/Meta-Llama-3.1-8B-Instruct", cache_dir=CACHE_DIR, local_files_only=True),
-            snapshot_download("unsloth/Llama-3.2-1B-Instruct", cache_dir=CACHE_DIR, local_files_only=True),
+            _resolve_cached_snapshot("unsloth/Meta-Llama-3.1-8B-Instruct"),
+            _resolve_cached_snapshot("unsloth/Llama-3.2-1B-Instruct"),
             "1:8.0",
             rows300,
         ),
