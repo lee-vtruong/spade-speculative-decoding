@@ -416,21 +416,24 @@ def build_draft_context(
 
     t0 = time.perf_counter()
     if policy == "sliding_window":
-        # StreamingLLM-style: initial sink (first sentence of passage 1) + trailing evidence sentences up to budget
+        # Sink (first sentence of passage 1) + contiguous trailing sentences up to budget_chars.
         pass_sents = [split_evidence_sentences_with_spans(str(e.get("text", ""))) for e in evidence]
         sink_sent = pass_sents[0][0][0] if pass_sents and pass_sents[0] else ""
-        tail_sents = []
+        tail_sents: list[str] = []
         cur_chars = len(sink_sent)
-        # gather from reverse (tail sliding window)
+        budget_reached = False
         for p_idx in reversed(range(len(evidence))):
             for tup in reversed(pass_sents[p_idx]):
                 s = tup[0]
+                if p_idx == 0 and s == sink_sent:
+                    continue
                 if cur_chars + len(s) + 1 <= budget_chars:
                     tail_sents.append(s)
                     cur_chars += len(s) + 1
                 else:
+                    budget_reached = True
                     break
-            if cur_chars >= budget_chars:
+            if budget_reached or cur_chars >= budget_chars:
                 break
         tail_sents.reverse()
         combined_text = (sink_sent + "\n... [omitted] ...\n" + "\n".join(tail_sents)).strip()
@@ -438,7 +441,7 @@ def build_draft_context(
         draft_prompt, draft_hash = build_prompt(claim, selected, mode=ev_mode)
         sel_ids = ["SW"]
         draft_chars = len(combined_text)
-    if policy == "selective_topk":
+    elif policy == "selective_topk":
         if top_k < 0:
             raise ValueError("top_k must be non-negative")
         if top_k == 0 or not evidence:

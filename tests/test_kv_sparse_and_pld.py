@@ -237,3 +237,23 @@ def test_streaming_llm_prefill_free_policy():
         streaming_llm_cfg={"kv_budget": 20, "sink_tokens": 4},
     )
     assert gen_short.timings["draft_prompt_tokens"] == 8.0
+
+
+def test_sliding_window_respects_budget_and_not_overwritten_by_compact():
+    from spade.adaptive.context_selection import build_draft_context, build_prompt
+
+    ev = [
+        {"evidence_id": "E1", "text": "Sink sentence one. " + " ".join(f"early{i}." for i in range(120))},
+        {"evidence_id": "E2", "text": " ".join(f"middle{i} extra padding words here." for i in range(150))},
+        {"evidence_id": "E3", "text": " ".join(f"tail{i} trailing evidence detail." for i in range(150))},
+    ]
+    prompt, _ = build_prompt("Test sliding window claim?", ev)
+    row = {"claim_id": "sw-test", "claim": "Test sliding window claim?", "evidence": ev, "prompt": prompt}
+
+    res = build_draft_context(row, policy="sliding_window", budget_chars=8000)
+    assert res.selected_evidence_ids == ["SW"]
+    assert res.selected_evidence_count == 1
+    assert res.draft_evidence_chars > 5000
+    assert res.draft_evidence_chars <= 8200
+    assert "Sink sentence one." in res.draft_prompt
+    assert "tail149 trailing evidence detail." in res.draft_prompt
