@@ -815,25 +815,25 @@ def run_qwen3_ratio_block() -> None:
         rec_by_arm: dict[str, dict[str, dict[str, Any]]] = {"AR": {}, "SPADE": {}, "Full": {}}
         full_error: str | None = None
 
-        # Precompute StaticDraftRunner for SPADE (compact) & Full; for 4B check if both fit or swap across 10-claim blocks
-        can_hold_both = True
+        # Precompute StaticDraftRunner for SPADE (compact) & Full; for large drafters (>=2.5B params),
+        # keep at most one StaticDraftRunner resident per arm (single-compile-per-arm) to leave target prefill VRAM headroom.
+        can_hold_both = (d_params < 2.5e9)
         runner_spade = runner_full = None
-        try:
-            runner_spade = StaticDraftRunner(pair.draft, max_cache_len=spade_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
-            runner_spade.prepare(warmup_steps=3)
-            runner_full = StaticDraftRunner(pair.draft, max_cache_len=full_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
-            runner_full.prepare(warmup_steps=3)
-        except torch.OutOfMemoryError:
-            can_hold_both = False
-            del runner_full, runner_spade
-            runner_full = runner_spade = None
-            _cleanup_cuda()
-
-        # Warmup AR outside timing
-        for gw in range(2):
-            pair.generate(rows[0]["prompt"], mode="B0-S", max_new_tokens=32, temperature=0.7, top_p=0.9, seed=700 + gw, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+        if can_hold_both:
+            try:
+                runner_spade = StaticDraftRunner(pair.draft, max_cache_len=spade_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
+                runner_spade.prepare(warmup_steps=3)
+                runner_full = StaticDraftRunner(pair.draft, max_cache_len=full_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
+                runner_full.prepare(warmup_steps=3)
+            except torch.OutOfMemoryError:
+                can_hold_both = False
+                del runner_full, runner_spade
+                runner_full = runner_spade = None
+                _cleanup_cuda()
 
         if can_hold_both:
+            for gw in range(2):
+                pair.generate(rows[0]["prompt"], mode="B0-S", max_new_tokens=32, temperature=0.7, top_p=0.9, seed=700 + gw, cache_strategy="kv_cache", distribution_mode="fp32_fast")
             assert runner_spade is not None and runner_full is not None
             pair.draft_runner = runner_spade
             pair.generate(rows[0]["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=710, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": rows[0], "budget_chars": 10000, "tail_window": 16})
@@ -867,42 +867,68 @@ def run_qwen3_ratio_block() -> None:
                     print(f"    {d_name}: {idx+1}/{len(rows)}", flush=True)
             del runner_full, runner_spade
             pair.draft_runner = None
+            torch._dynamo.reset()
+            _cleanup_cuda()
         else:
-            # Alternating 20-claim mini-blocks keeping one runner resident at a time (e.g. for Qwen3-4B)
-            print(f"    {d_name}: Dual StaticCaches exceeded 32GB -> running alternating 20-claim blocks", flush=True)
-            chunk = 20
-            for blk_i, start in enumerate(range(0, len(rows), chunk)):
-                sub = rows[start : start + chunk]
-                # AR runs first per sub-claim alongside whichever SD arm runs cleanly
-                for j, row in enumerate(sub):
-                    idx = start + j
+            # Single-compile-per-arm sequence (AR -> SPADE -> Full) keeping at most one StaticDraftRunner resident.
+            print(f"    {d_name}: Single-runner sequential AR -> SPADE -> Full mode", flush=True)
+            shortest_row = min(rows, key=lambda r: len(r["prompt"]))
+
+            pair.draft_runner = None
+            for gw in range(2):
+                pair.generate(shortest_row["prompt"], mode="B0-S", max_new_tokens=32, temperature=0.7, top_p=0.9, seed=700 + gw, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+            _cleanup_cuda()
+            for idx, row in enumerate(rows):
+                cid = str(row["claim_id"])
+                g = pair.generate(row["prompt"], mode="B0-S", max_new_tokens=384, temperature=0.7, top_p=0.9, seed=42 + idx, run_id=f"q3-{d_name}-ar", claim_id=cid, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+                rec_by_arm["AR"][cid] = _extract_gen_record(cid, g)
+                if (idx + 1) % 25 == 0 or (idx + 1) == len(rows):
+                    print(f"    {d_name}-AR: {idx+1}/{len(rows)}", flush=True)
+            _cleanup_cuda()
+
+            runner_sp = StaticDraftRunner(pair.draft, max_cache_len=spade_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
+            try:
+                runner_sp.prepare(warmup_steps=3)
+                pair.draft_runner = runner_sp
+                pair.generate(shortest_row["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=710, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": shortest_row, "budget_chars": 10000, "tail_window": 16})
+                _cleanup_cuda()
+                for idx, row in enumerate(rows):
                     cid = str(row["claim_id"])
-                    g = pair.generate(row["prompt"], mode="B0-S", max_new_tokens=384, temperature=0.7, top_p=0.9, seed=42 + idx, run_id=f"q3-{d_name}-ar", claim_id=cid, cache_strategy="kv_cache", distribution_mode="fp32_fast")
-                    rec_by_arm["AR"][cid] = _extract_gen_record(cid, g)
-                order = ("SPADE", "Full") if (blk_i % 2 == 0) else ("Full", "SPADE")
-                for arm in order:
-                    if arm == "Full" and full_error is not None:
-                        continue
-                    cap = spade_cap if arm == "SPADE" else full_cap
-                    try:
-                        pair.prepare_draft_runner(mode="compile_reduce_overhead", max_cache_len=cap, warmup_steps=3)
-                        wcfg = {"row": sub[0], "budget_chars": 10000, "tail_window": 16} if arm == "SPADE" else None
-                        pair.generate(sub[0]["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=710, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg=wcfg)
-                        _cleanup_cuda()
-                        for j, row in enumerate(sub):
-                            idx = start + j
-                            cid = str(row["claim_id"])
-                            cfg = {"row": row, "budget_chars": 10000, "tail_window": 16} if arm == "SPADE" else None
-                            g = pair.generate(row["prompt"], mode="B2", max_new_tokens=384, draft_length=4, temperature=0.7, top_p=0.9, seed=42 + idx, run_id=f"q3-{d_name}-{arm.lower()}", claim_id=cid, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg=cfg)
-                            rec_by_arm[arm][cid] = _extract_gen_record(cid, g)
-                    except torch.OutOfMemoryError as exc:
-                        if arm == "Full":
-                            full_error = str(exc)
-                        else:
-                            raise
-                    finally:
-                        pair.draft_runner = None
-                        _cleanup_cuda()
+                    g = pair.generate(row["prompt"], mode="B2", max_new_tokens=384, draft_length=4, temperature=0.7, top_p=0.9, seed=42 + idx, run_id=f"q3-{d_name}-spade", claim_id=cid, cache_strategy="kv_cache", distribution_mode="fp32_fast", target_attn_selector_cfg={"row": row, "budget_chars": 10000, "tail_window": 16})
+                    rec_by_arm["SPADE"][cid] = _extract_gen_record(cid, g)
+                    if (idx + 1) % 25 == 0 or (idx + 1) == len(rows):
+                        print(f"    {d_name}-SPADE: {idx+1}/{len(rows)}", flush=True)
+            finally:
+                pair.draft_runner = None
+                del runner_sp
+                gc.collect()
+                torch._dynamo.reset()
+                _cleanup_cuda()
+
+            runner_fl = None
+            try:
+                runner_fl = StaticDraftRunner(pair.draft, max_cache_len=full_cap, mode="compile_reduce_overhead", device=pair._input_device(pair.draft))
+                runner_fl.prepare(warmup_steps=3)
+                pair.draft_runner = runner_fl
+                pair.generate(shortest_row["prompt"], mode="B2", max_new_tokens=16, draft_length=4, temperature=0.7, top_p=0.9, seed=720, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+                _cleanup_cuda()
+                for idx, row in enumerate(rows):
+                    cid = str(row["claim_id"])
+                    g = pair.generate(row["prompt"], mode="B2", max_new_tokens=384, draft_length=4, temperature=0.7, top_p=0.9, seed=42 + idx, run_id=f"q3-{d_name}-full", claim_id=cid, cache_strategy="kv_cache", distribution_mode="fp32_fast")
+                    rec_by_arm["Full"][cid] = _extract_gen_record(cid, g)
+                    if (idx + 1) % 25 == 0 or (idx + 1) == len(rows):
+                        print(f"    {d_name}-Full: {idx+1}/{len(rows)}", flush=True)
+            except torch.OutOfMemoryError as exc:
+                full_error = str(exc)
+                rec_by_arm["Full"].clear()
+                print(f"    {d_name}-Full OOM caught cleanly: {full_error[:180]}", flush=True)
+            finally:
+                pair.draft_runner = None
+                if runner_fl is not None:
+                    del runner_fl
+                gc.collect()
+                torch._dynamo.reset()
+                _cleanup_cuda()
 
         ar_sum = _aggregate_metrics(list(rec_by_arm["AR"].values()))
         sp_sum = _aggregate_metrics(list(rec_by_arm["SPADE"].values()))
