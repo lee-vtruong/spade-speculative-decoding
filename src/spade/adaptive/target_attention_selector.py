@@ -217,6 +217,7 @@ class TargetPrefillAttentionHook:
         past_key_values: Any,
         *,
         head_agg: str = "mean",
+        seq_len: int | None = None,
     ) -> torch.Tensor:
         """Compute exact 1D per-token importance `[P]` for a single hooked layer on-device."""
         if head_agg not in {"mean", "max"}:
@@ -224,7 +225,10 @@ class TargetPrefillAttentionHook:
         h_tail, cos_tail, sin_tail = self._captured[l_idx]
         attn_mod = self.layers[l_idx].self_attn
         k_all = _extract_layer_keys(past_key_values, l_idx)  # [B, n_kv, P, D]
-        bsz, n_kv, seq_len, head_dim = k_all.shape
+        if seq_len is not None:
+            # Slice pre-allocated StaticCache capacity down to the populated prompt length
+            k_all = k_all[:, :, : int(seq_len), :]
+        bsz, n_kv, kv_len, head_dim = k_all.shape
         w = int(h_tail.shape[1])
 
         q_proj = attn_mod.q_proj(h_tail).view(bsz, w, -1, head_dim)
@@ -244,8 +248,8 @@ class TargetPrefillAttentionHook:
 
         # Causal mask on the W x W bottom-right corner
         if w > 1:
-            row_idx = torch.arange(seq_len - w, seq_len, device=scores.device).view(1, 1, 1, w, 1)
-            col_idx = torch.arange(seq_len, device=scores.device).view(1, 1, 1, 1, seq_len)
+            row_idx = torch.arange(kv_len - w, kv_len, device=scores.device).view(1, 1, 1, w, 1)
+            col_idx = torch.arange(kv_len, device=scores.device).view(1, 1, 1, 1, kv_len)
             scores = scores.masked_fill(col_idx > row_idx, float("-inf"))
 
         probs = torch.softmax(scores.float(), dim=-1)  # [B, n_kv, n_rep, w, P]
@@ -260,6 +264,7 @@ class TargetPrefillAttentionHook:
         *,
         layer_subset: list[int] | None = None,
         head_agg: str = "mean",
+        seq_len: int | None = None,
     ) -> tuple[torch.Tensor, float]:
         """Compute exact mean attention importance `[P]` across hooked layers from cached K & captured Q_tail."""
         t0 = time.perf_counter()
@@ -269,7 +274,9 @@ class TargetPrefillAttentionHook:
 
         acc_importance: torch.Tensor | None = None
         for l_idx in use_layers:
-            layer_imp = self.compute_layer_token_importance(l_idx, past_key_values, head_agg=head_agg)
+            layer_imp = self.compute_layer_token_importance(
+                l_idx, past_key_values, head_agg=head_agg, seq_len=seq_len
+            )
             acc_importance = layer_imp if acc_importance is None else (acc_importance + layer_imp)
 
         assert acc_importance is not None
