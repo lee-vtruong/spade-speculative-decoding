@@ -384,7 +384,7 @@ def main() -> None:
     # 2. Long-173 Controlled Baseline Suite
     l173_specs = [
         ("Baseline Full", RUNS_DIR / "v6_long173" / "long173-baseline-full"),
-        ("StreamingLLM (MagicDec-style, B=2,529)", RUNS_DIR / "v6_long173" / "long173-streamingllm-2529"),
+        ("Sink+Recent Trunc. (B=2,529)", RUNS_DIR / "v6_long173" / "long173-streamingllm-2529"),
         ("KV-Sparse (B=2,529)", RUNS_DIR / "v6_long173" / "long173-kvsparse-2529"),
         ("KV-Sparse (B=1,776)", RUNS_DIR / "v6_long173" / "long173-kvsparse-1776"),
         ("KV-Sparse (B=512)", RUNS_DIR / "v6_long173" / "long173-kvsparse-512"),
@@ -415,7 +415,7 @@ def main() -> None:
     l173_pairwise = {}
     for ta, tb in [
         ("SPADE B=10k (Default)", "BM25 Sent-B10k"),
-        ("SPADE B=10k (Default)", "StreamingLLM (MagicDec-style, B=2,529)"),
+        ("SPADE B=10k (Default)", "Sink+Recent Trunc. (B=2,529)"),
         ("SPADE B=10k (Default)", "KV-Sparse (B=2,529)"),
         ("SPADE B=10k (Default)", "KV-Sparse (B=1,776)"),
         ("SPADE B=10k (Default)", "Prompt-Lookup (PLD)"),
@@ -550,10 +550,11 @@ def main() -> None:
     llama3_hook_path = REV_DIR / "hook_exactness_llama3.json"
     llama3_hook = json.loads(llama3_hook_path.read_text(encoding="utf-8")) if llama3_hook_path.exists() else None
 
-    # 5. Theorem 1 (300 claims + teacher-forced) + 4-way Scaling Holm
+    # 5. Theorem 1 (300 claims + teacher-forced) + 4-way Scaling Holm (vs Full) & 5-way Scaling Holm (vs AR)
     thm1_300 = analyze_theorem1_300()
     sc_path = REV_DIR / "e2e_scaling_2k_32k.json"
     scaling_holm = {}
+    scaling_ar_holm = {}
     if sc_path.exists():
         sc_raw = json.loads(sc_path.read_text(encoding="utf-8"))
         sc_keys = [k for k in ("2048", "4096", "8192", "16384") if k in sc_raw and "delta_spade_vs_full" in sc_raw[k]]
@@ -562,6 +563,12 @@ def main() -> None:
             entry = dict(sc_raw[k]["delta_spade_vs_full"])
             entry["p_holm"] = round(pa, 4)
             scaling_holm[k] = entry
+        ar_keys = [k for k in ("2048", "4096", "8192", "16384", "32768") if k in sc_raw and "delta_spade_vs_ar" in sc_raw[k]]
+        p_ar_adj = holm_bonferroni([float(sc_raw[k]["delta_spade_vs_ar"]["p_raw"]) for k in ar_keys])
+        for k, pa in zip(ar_keys, p_ar_adj):
+            entry = dict(sc_raw[k]["delta_spade_vs_ar"])
+            entry["p_holm"] = round(pa, 4)
+            scaling_ar_holm[k] = entry
 
     master = {
         "heldout300_holm": h300_comps,
@@ -570,6 +577,7 @@ def main() -> None:
         "longbench": {"rows": lb["rows"], "vs_full": lb_vs_full, "pairwise_holm": lb_pairwise, "qa_f1_holm": lb_qa_f1_holm},
         "llama3": {"rows": llama3["rows"], "vs_full": llama3_vs_full, "pairwise_holm": llama3_pairwise, "hook_exactness": llama3_hook},
         "scaling_holm": scaling_holm,
+        "scaling_ar_holm": scaling_ar_holm,
         "theorem1_300": thm1_300,
     }
     (REV_DIR / "v6_master_analysis.json").write_text(json.dumps(master, indent=2) + "\n", encoding="utf-8")
@@ -604,7 +612,7 @@ def main() -> None:
             "\\begin{tabular}{lcccccccr}\n\\toprule\n"
             "\\textbf{Configuration} & \\textbf{Draft Tok / KV Slots} & \\textbf{Draft KV Peak} & \\textbf{Sel./Evict (ms)} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Dec tok/s} & \\textbf{E2E tok/s} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Controlled Long-Context Baseline \\& Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Compares uncompressed Full-SD, prefill-free \\texttt{StreamingLLM} (MagicDec-style: 256 sink + 2,273 recent tokens sliced directly before draft prefill), our SnapKV-style \\texttt{KV-Sparse} eviction baseline (full prefill then sink+recent+pooled attention eviction with RoPE preservation), training-free Prompt-Lookup (PLD), sliding window, zero-evidence ($B=0$), lexical BM25, and SPADE ($B=2\\text{k}$ and $B=10\\text{k}$, slot-matched against $B=2,529$). Paired bootstrap 95\\% CIs ($B=10,000$).}\n"
+            "\\caption{\\textbf{Controlled Long-Context Baseline \\& Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Compares uncompressed Full-SD, prefill-free \\texttt{Sink+Recent Trunc.} (256 sink + 2,273 trailing token IDs sliced before draft prefill with contiguous $0\\dots B-1$ RoPE re-indexing; not original MagicDec), our SnapKV-style \\texttt{KV-Sparse} eviction baseline (full prefill then sink+recent+pooled attention eviction with RoPE preservation), Prompt-Lookup (PLD), repaired Sliding Window ($B=8\\text{k}$ chars), zero-evidence ($B=0$), lexical BM25, and SPADE ($B=2\\text{k}$ and $B=10\\text{k}$, slot-matched against $B=2,529$). Paired bootstrap 95\\% CIs ($B=10,000$).}\n"
             "\\label{tab:decisive_baselines}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_decisive_baselines.tex").write_text(tex, encoding="utf-8")
@@ -676,15 +684,22 @@ def main() -> None:
                 ci_full = "Full OOM"
             else:
                 ci_full = "—"
+            if "delta_spade_vs_ar" in d:
+                dsa = d["delta_spade_vs_ar"]
+                ci_ar = f"{dsa['delta']:+.2f} [{dsa['ci_lo']:+.2f}, {dsa['ci_hi']:+.2f}]"
+            else:
+                ci_ar = "—"
             df_pre = df_pre.replace("->", "$\\to$")
             tot_pre = tot_pre.replace("->", "$\\to$")
-            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_alpha} & {sp_e2e} & {ci_full} \\\\")
+            lines.append(f"{L_lbl} ({d.get('actual_tokens', L_str):,}) & {t_pre} ms & {hk} & {df_pre} ms & {tot_pre} ms & {ar_e2e} & {fl_e2e} & {sp_alpha} & {sp_e2e} & {ci_ar} & {ci_full} \\\\")
+        p16_v = scaling_holm.get("16384", {}).get("p_holm", 0.0)
+        p16_str = "< 10^{-4}" if p16_v < 0.0001 else f"= {p16_v:.4f}"
         tex = (
             "\\begin{table*}[t]\n\\centering\n\\small\n\\resizebox{\\textwidth}{!}{%\n"
-            "\\begin{tabular}{lccccccccr}\n\\toprule\n"
-            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
+            "\\begin{tabular}{lcccccccccr}\n\\toprule\n"
+            "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} & \\textbf{$\\Delta$ vs.\\ AR (95\\% CI)} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{logits\\_to\\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\\% CIs ($B=10,000$). At 2k, \\texttt{StaticCache} capacities match identically and SPADE triggers bypass." + measured_2k_hook + f" After 4-way Holm correction across 2k--16k, SPADE outperforms Full-SD significantly at 16k ($p_{{\\text{{Holm}}}}={scaling_holm.get('16384', {}).get('p_holm', 0.0):.4f}$) while 8k raw $p={scaling_holm.get('8192', {}).get('p_raw', 0.041):.3f}$ adjusts to $p_{{\\text{{Holm}}}}={scaling_holm.get('8192', {}).get('p_holm', 0.123):.3f}$; Target AR leads at 16k--32k as target prefill and KV verification dominate.}}\n"
+            "\\caption{\\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{logits\\_to\\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with $\\ge 1,500$-char held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\\% CIs ($B=10,000$). At 2k, \\texttt{StaticCache} capacities match identically and SPADE triggers bypass (inconclusive vs.\\ Full-SD given wide CI $[-8.88, +1.74]$)." + measured_2k_hook + f" After 5-way Holm correction vs.\\ Target AR across 2k--32k, SPADE significantly beats AR at 2k, 4k, and 8k (all $p_{{\\text{{Holm}}}} < 10^{{-4}}$) and trails AR at 16k--32k ($p_{{\\text{{Holm}}}} < 10^{{-4}}$). After 4-way Holm correction vs.\\ Full-SD across 2k--16k, SPADE significantly beats Full-SD at 16k ($p_{{\\text{{Holm}}}} {p16_str}$) while 8k raw $p={scaling_holm.get('8192', {}).get('p_raw', 0.041):.3f}$ adjusts to $p_{{\\text{{Holm}}}}={scaling_holm.get('8192', {}).get('p_holm', 0.123):.3f}$.}}\n"
             "\\label{tab:long_context_scaling}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_long_context_scaling.tex").write_text(tex, encoding="utf-8")
