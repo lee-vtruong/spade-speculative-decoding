@@ -14,6 +14,6 @@
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Cross-Model Architecture Generalization on 300 Held-Out Long-Context Claims (Qwen2.5-7B Target + Qwen2.5-0.5B Draft, RTX 5090):} Throughput reported in tok/s; latency in ms/tok. Statistical significance tested via paired cluster bootstrap ($B=10,000$ iterations, * denotes $p < 0.001$). SPADE achieves a $+11.7\%$ speedup over Target AR ($51.67$ vs.\ $46.27\text{ tok/s}$) and $+6.4\%$ over Baseline Full ($51.67$ vs.\ $48.56\text{ tok/s}$), while reducing active draft KV cache by $-63.8\%$ ($61.0\text{ MB} \to 22.1\text{ MB}$).}
+\caption{\textbf{Cross-Model Architecture Generalization on 300 Held-Out Long-Context Claims (Qwen2.5-7B Target + Qwen2.5-0.5B Draft, RTX 5090):} Throughput reported in tok/s; latency in ms/tok. Statistical significance tested via paired cluster bootstrap ($B=10,000$ iterations, * denotes $p < 0.001$). SPADE achieves a $+11.7\%$ speedup over Target AR ($51.67$ vs.\ $46.27\text{ tok/s}$) and $+6.4\%$ over Baseline Full ($51.67$ vs.\ $48.56\text{ tok/s}$), while reducing active draft KV cache by $-63.8\%$ ($61.0\text{ MB} \to 22.1\text{ MB}$). All five arms produce $100.0\%$ ($300/300$) valid JSON after stripping Markdown code fences ($7.0\%\text{--}9.3\%$ strict unfenced; mean $101.0\text{--}104.0$ output tokens).}
 \label{tab:qwen25_generalization}
 \end{table*}

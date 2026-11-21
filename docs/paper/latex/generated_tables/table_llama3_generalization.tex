@@ -14,6 +14,6 @@
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):} SPADE recovers E2E parity with Target AR (47.92 vs.\ 47.93 tok/s, $p_{\text{Holm}}=1.00$) and outperforms Baseline Full by +2.5\% ($p_{\text{Holm}}=0.049$) and BM25 Top-2 ($p_{\text{Holm}}=0.006$) with -64.3\% active draft KV (full metrics in Appendix Table \ref{tab:llama3_generalization_full}).}
+\caption{\textbf{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):} Under a $1:8$ draft ratio, SD yields no speedup over Target AR; SPADE restores E2E parity with AR (47.92 vs.\ 47.93 tok/s, $p_{\text{Holm}}=1.00$) with a borderline +1.16 tok/s gain over Full-SD ($p_{\text{Holm}}=0.037$, within short-context drift) and -64.3\% draft KV (88.3\%--93.3\% strict / 94.3\%--97.3\% fence-stripped JSON validity; full metrics in Appendix Table \ref{tab:llama3_generalization_full}).}
 \label{tab:llama3_generalization}
 \end{table}

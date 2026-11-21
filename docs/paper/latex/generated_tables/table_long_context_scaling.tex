@@ -14,6 +14,6 @@
 \bottomrule
 \end{tabular}%
 }
-\caption{\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Reports target prefill, hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM and paired bootstrap 95\% CIs ($B=10,000$). At 2k, \texttt{StaticCache} capacities are matched identically and SPADE triggers its short-context bypass. Standalone forced-hook overhead at 2k is 6.37 ms. While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute beyond 10k--14k tokens.}
+\caption{\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \texttt{logits\_to\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\% CIs ($B=10,000$). At 2k, \texttt{StaticCache} capacities match identically and SPADE triggers bypass. Standalone forced-hook overhead at 2k is 6.37 ms. After 4-way Holm correction across 2k--16k, SPADE outperforms Full-SD significantly at 16k ($p_{\text{Holm}}=0.0000$) while 8k raw $p=0.041$ adjusts to $p_{\text{Holm}}=0.123$; Target AR leads at 16k--32k as target prefill and KV verification dominate.}
 \label{tab:long_context_scaling}
 \end{table*}
