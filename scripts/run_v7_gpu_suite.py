@@ -191,7 +191,7 @@ def _build_cmd(
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--blocks", nargs="+", default=["kv2529", "scaling20", "llama3"], choices=["kv2529", "scaling20", "llama3"])
+    p.add_argument("--blocks", nargs="+", default=["kv2529", "scaling20", "llama3"], choices=["kv2529", "streaming2529", "scaling20", "llama3"])
     args = p.parse_args()
 
     PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +218,27 @@ def main() -> None:
                 seed=42,
                 global_warmup=3,
                 policy="kv_sparse",
+                kv_budget=2529,
+            ),
+        })
+
+    if "streaming2529" in args.blocks:
+        jobs.append({
+            "kind": "run",
+            "block": "streaming2529",
+            "output_root": "outputs/runs/v6_long173",
+            "run_id": "long173-streamingllm-2529",
+            "cmd": _build_cmd(
+                mode="B2",
+                input_path="outputs/benchmarks/retrieved-heldout-long173.jsonl",
+                output_root="outputs/runs/v6_long173",
+                run_id="long173-streamingllm-2529",
+                target_path=qwen3_t,
+                draft_path=qwen3_d,
+                max_new_tokens=384,
+                seed=42,
+                global_warmup=3,
+                policy="streaming_llm",
                 kv_budget=2529,
             ),
         })

@@ -199,3 +199,41 @@ def test_format_qwen_prompt_supports_llama_fallback():
 
     out = format_qwen_prompt(_LlamaTok(), "hello world")
     assert out == "<|begin_of_text|>hello world<|eot_id|>"
+
+
+def test_streaming_llm_prefill_free_policy():
+    pair = _tiny_qwen_pair()
+    pair.prepare_draft_runner(mode="eager_static", max_cache_len=64, warmup_steps=1)
+
+    long_prompt = " ".join(f"tok{i}" for i in range(25))
+    gen_long = pair.generate(
+        long_prompt,
+        mode="B2",
+        max_new_tokens=6,
+        draft_length=3,
+        temperature=1.0,
+        top_p=1.0,
+        seed=42,
+        cache_strategy="kv_cache",
+        distribution_mode="fp32_fast",
+        streaming_llm_cfg={"kv_budget": 10, "sink_tokens": 4},
+    )
+    assert gen_long.timings["draft_prompt_tokens"] == 10.0
+    assert gen_long.timings["context_selection_s"] >= 0.0
+    assert pair.draft_runner is not None
+    assert pair.draft_runner.pos_offset == 0
+
+    short_prompt = " ".join(f"s{i}" for i in range(8))
+    gen_short = pair.generate(
+        short_prompt,
+        mode="B2",
+        max_new_tokens=4,
+        draft_length=3,
+        temperature=1.0,
+        top_p=1.0,
+        seed=42,
+        cache_strategy="kv_cache",
+        distribution_mode="fp32_fast",
+        streaming_llm_cfg={"kv_budget": 20, "sink_tokens": 4},
+    )
+    assert gen_short.timings["draft_prompt_tokens"] == 8.0

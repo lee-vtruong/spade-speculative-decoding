@@ -37,7 +37,7 @@ def main():
     p.add_argument("--order-decay",type=float,default=0.5,help="Higher-order n-gram scaling factor for M4 biasing")
     p.add_argument("--entropy-threshold",type=float,default=2.0,help="Entropy threshold (nats) for sigmoid gating in M4")
     p.add_argument("--max-boost-cap",type=float,default=3.0,help="Upper bound on applied logit boost in M4")
-    p.add_argument("--draft-context-policy",choices=["full","no_evidence","sliding_window","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget","kv_sparse"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
+    p.add_argument("--draft-context-policy",choices=["full","no_evidence","sliding_window","selective_topk","compact","hybrid_topk_compact","sentence_budget","target_attn_sentence_budget","random_sentence_budget","kv_sparse","streaming_llm"],default="full",help="Asymmetric draft context policy (target always uses full evidence)")
     p.add_argument("--draft-top-k",type=int,default=2,help="Evidence passages retained for draft under selective_topk / hybrid_topk_compact")
     p.add_argument("--draft-compact-sentences",type=int,default=1,help="Max claim-salient sentences per evidence passage under compact / hybrid_topk_compact")
     p.add_argument("--draft-compact-chars",type=int,default=160,help="Max characters per evidence passage under compact / hybrid_topk_compact")
@@ -70,7 +70,7 @@ def main():
     if a.max_new_tokens<1 or a.trials<1 or a.warmup<0 or a.global_warmup<0: p.error("Invalid token/warmup/trial count")
     if a.beta0 < 0.0: p.error("--beta0 must be non-negative")
     if a.max_boost_cap < 0.0: p.error("--max-boost-cap must be non-negative")
-    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or (a.draft_context_policy not in {"no_evidence","kv_sparse"} and a.draft_budget_chars < 256) or a.draft_kv_budget < 16 or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
+    if a.draft_top_k < 0 or a.draft_compact_sentences < 1 or a.draft_compact_chars < 16 or (a.draft_context_policy not in {"no_evidence","kv_sparse","streaming_llm"} and a.draft_budget_chars < 256) or a.draft_kv_budget < 16 or a.draft_attn_tail_window < 1 or a.draft_min_sentences_per_passage < 0: p.error("Invalid draft context policy hyperparameters")
     rows=read_jsonl(a.input)
     if a.limit is not None: rows=rows[:a.limit]
     if not rows: p.error("Input JSONL has no examples")
@@ -109,7 +109,7 @@ def main():
                     max_p_len = max(max_p_len, len(dtok(ser_d, add_special_tokens=False)["input_ids"]))
                 est_budget_p_len = int(a.draft_budget_chars / 2.2) + 512
                 max_p_len = min(max_p_len, est_budget_p_len)
-            elif a.draft_context_policy == "kv_sparse":
+            elif a.draft_context_policy in {"kv_sparse", "streaming_llm"}:
                 for row in rows:
                     ser_d = format_qwen_prompt(dtok, row["prompt"])
                     max_p_len = max(max_p_len, len(dtok(ser_d, add_special_tokens=False)["input_ids"]))
@@ -165,6 +165,7 @@ def main():
     canonical=[]; trial_rows=[]
     common={"mode":a.mode,"max_new_tokens":a.max_new_tokens,"draft_length":a.draft_length,"temperature":a.temperature,"top_k":a.top_k,"top_p":a.top_p,"cache_strategy":a.cache_strategy,"dynamic_k":a.dynamic_k,"biasing_config":biasing_cfg,"enable_biasing":enable_biasing,"distribution_mode":a.distribution_mode}
     kv_sparse_cfg = {"kv_budget": a.draft_kv_budget} if (a.mode not in {"B0", "B0-S", "PLD"} and a.draft_context_policy == "kv_sparse") else None
+    streaming_llm_cfg = {"kv_budget": a.draft_kv_budget, "sink_tokens": 256} if (a.mode not in {"B0", "B0-S", "PLD"} and a.draft_context_policy == "streaming_llm") else None
     if a.global_warmup > 0:
         wrow = rows[0]
         wev = [e.get("text","") for e in wrow.get("evidence",[])]
@@ -174,14 +175,14 @@ def main():
         elif a.draft_context_policy == "target_attn_sentence_budget":
             w_attn_cfg = {"row": wrow, "budget_chars": a.draft_budget_chars, "tail_window": a.draft_attn_tail_window, "min_sentences_per_passage": a.draft_min_sentences_per_passage, "layer_spec": a.draft_attn_layers, "head_agg": a.draft_attn_head_agg, "sentence_agg": a.draft_attn_agg}
             wdraft = None
-        elif a.draft_context_policy == "kv_sparse":
+        elif a.draft_context_policy in {"kv_sparse", "streaming_llm"}:
             w_attn_cfg = None
             wdraft = None
         else:
             w_attn_cfg = None
             wdraft = build_draft_context(wrow, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars, budget_chars=a.draft_budget_chars, min_sentences_per_passage=a.draft_min_sentences_per_passage, seed=a.seed) if a.draft_context_policy != "full" else None
         for gw in range(a.global_warmup):
-            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev,draft_prompt=wdraft.draft_prompt if wdraft else None,target_attn_selector_cfg=w_attn_cfg,kv_sparse_cfg=kv_sparse_cfg)
+            pair.generate(wrow["prompt"],**{**common,"max_new_tokens":min(32,a.max_new_tokens)},seed=a.seed+9999+gw,run_id=f"{run_id}-gwarm{gw}",claim_id=str(wrow["claim_id"]),evidence_texts=wev,draft_prompt=wdraft.draft_prompt if wdraft else None,target_attn_selector_cfg=w_attn_cfg,kv_sparse_cfg=kv_sparse_cfg,streaming_llm_cfg=streaming_llm_cfg)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
@@ -204,6 +205,9 @@ def main():
                 elif a.draft_context_policy == "kv_sparse":
                     dctx = build_draft_context(row, policy="full")
                     generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts,kv_sparse_cfg=kv_sparse_cfg)
+                elif a.draft_context_policy == "streaming_llm":
+                    dctx = build_draft_context(row, policy="full")
+                    generation=pair.generate(row["prompt"],**common,seed=a.seed+index+trial,run_id=trial_run_id,claim_id=str(row["claim_id"]),evidence_texts=evidence_texts,streaming_llm_cfg=streaming_llm_cfg)
                 else:
                     dctx = build_draft_context(row, policy=a.draft_context_policy, top_k=a.draft_top_k, compact_sentences=a.draft_compact_sentences, compact_chars=a.draft_compact_chars, budget_chars=a.draft_budget_chars, min_sentences_per_passage=a.draft_min_sentences_per_passage, seed=a.seed+index)
                     draft_prompt_arg = dctx.draft_prompt if a.draft_context_policy != "full" else None

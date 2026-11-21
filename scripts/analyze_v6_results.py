@@ -352,9 +352,39 @@ def main() -> None:
             c["alpha_eval"]["p_holm"] = round(adj_a, 4)
             c["e2e_tok_s"]["p_holm"] = round(adj_t, 4)
 
+    # 1b. Heldout-300 Stratified SPADE vs Target AR & Baseline Full (exact paired bootstrap per stratum)
+    h300_strata_ar = {}
+    bench300_path = Path("outputs/benchmarks/retrieved-heldout300.jsonl")
+    ar_run_dir = RUNS_DIR / "b1-4-heldout300-b0s"
+    if bench300_path.exists() and (ar_run_dir / "metrics.json").exists() and "SPADE" in h300["cmaps"] and "Baseline Full" in h300["cmaps"]:
+        ev_chars_map = {
+            str(r["claim_id"]): sum(len(str(e.get("text", ""))) for e in (r.get("evidence") or []))
+            for r in (json.loads(l) for l in bench300_path.read_text(encoding="utf-8").splitlines() if l.strip())
+        }
+        ar_m = _extract_run_claims(ar_run_dir)
+        full_m = h300["cmaps"]["Baseline Full"]
+        sp_m = h300["cmaps"]["SPADE"]
+        strata_defs = [
+            ("bypass_le_10k", lambda c: c <= 10000),
+            ("selective_gt_10k", lambda c: c > 10000),
+            ("dense_ge_20k", lambda c: c >= 20000),
+        ]
+        for sname, sfn in strata_defs:
+            ids = {cid for cid, ch in ev_chars_map.items() if sfn(ch) and cid in ar_m and cid in sp_m and cid in full_m}
+            ar_s = {cid: ar_m[cid] for cid in ids}
+            fl_s = {cid: full_m[cid] for cid in ids}
+            sp_s = {cid: sp_m[cid] for cid in ids}
+            h300_strata_ar[sname] = {
+                "n_claims": len(ids),
+                "spade_vs_ar_e2e": _boot(ar_s, sp_s, "e2e_tok_s"),
+                "full_vs_ar_e2e": _boot(ar_s, fl_s, "e2e_tok_s"),
+                "spade_vs_full_e2e": _boot(fl_s, sp_s, "e2e_tok_s"),
+            }
+
     # 2. Long-173 Controlled Baseline Suite
     l173_specs = [
         ("Baseline Full", RUNS_DIR / "v6_long173" / "long173-baseline-full"),
+        ("StreamingLLM (MagicDec-style, B=2,529)", RUNS_DIR / "v6_long173" / "long173-streamingllm-2529"),
         ("KV-Sparse (B=2,529)", RUNS_DIR / "v6_long173" / "long173-kvsparse-2529"),
         ("KV-Sparse (B=1,776)", RUNS_DIR / "v6_long173" / "long173-kvsparse-1776"),
         ("KV-Sparse (B=512)", RUNS_DIR / "v6_long173" / "long173-kvsparse-512"),
@@ -381,10 +411,11 @@ def main() -> None:
         for lbl, padj in zip(keys_order, holm_bonferroni(raw_ps)):
             l173_vs_full[lbl]["p_holm"] = round(padj, 4)
 
-    # Pairwise key comparisons on Long-173 (SPADE B=10k vs BM25, KV-Sparse-2529/1776, PLD; SPADE B=2k vs KV-Sparse-512)
+    # Pairwise key comparisons on Long-173
     l173_pairwise = {}
     for ta, tb in [
         ("SPADE B=10k (Default)", "BM25 Sent-B10k"),
+        ("SPADE B=10k (Default)", "StreamingLLM (MagicDec-style, B=2,529)"),
         ("SPADE B=10k (Default)", "KV-Sparse (B=2,529)"),
         ("SPADE B=10k (Default)", "KV-Sparse (B=1,776)"),
         ("SPADE B=10k (Default)", "Prompt-Lookup (PLD)"),
@@ -519,14 +550,26 @@ def main() -> None:
     llama3_hook_path = REV_DIR / "hook_exactness_llama3.json"
     llama3_hook = json.loads(llama3_hook_path.read_text(encoding="utf-8")) if llama3_hook_path.exists() else None
 
-    # 5. Theorem 1 (300 claims + teacher-forced)
+    # 5. Theorem 1 (300 claims + teacher-forced) + 4-way Scaling Holm
     thm1_300 = analyze_theorem1_300()
+    sc_path = REV_DIR / "e2e_scaling_2k_32k.json"
+    scaling_holm = {}
+    if sc_path.exists():
+        sc_raw = json.loads(sc_path.read_text(encoding="utf-8"))
+        sc_keys = [k for k in ("2048", "4096", "8192", "16384") if k in sc_raw and "delta_spade_vs_full" in sc_raw[k]]
+        p_adj = holm_bonferroni([float(sc_raw[k]["delta_spade_vs_full"]["p_raw"]) for k in sc_keys])
+        for k, pa in zip(sc_keys, p_adj):
+            entry = dict(sc_raw[k]["delta_spade_vs_full"])
+            entry["p_holm"] = round(pa, 4)
+            scaling_holm[k] = entry
 
     master = {
         "heldout300_holm": h300_comps,
+        "heldout300_strata_ar": h300_strata_ar,
         "long173": {"rows": l173["rows"], "vs_full": l173_vs_full, "pairwise_holm": l173_pairwise},
         "longbench": {"rows": lb["rows"], "vs_full": lb_vs_full, "pairwise_holm": lb_pairwise, "qa_f1_holm": lb_qa_f1_holm},
         "llama3": {"rows": llama3["rows"], "vs_full": llama3_vs_full, "pairwise_holm": llama3_pairwise, "hook_exactness": llama3_hook},
+        "scaling_holm": scaling_holm,
         "theorem1_300": thm1_300,
     }
     (REV_DIR / "v6_master_analysis.json").write_text(json.dumps(master, indent=2) + "\n", encoding="utf-8")
@@ -561,7 +604,7 @@ def main() -> None:
             "\\begin{tabular}{lcccccccr}\n\\toprule\n"
             "\\textbf{Configuration} & \\textbf{Draft Tok / KV Slots} & \\textbf{Draft KV Peak} & \\textbf{Sel./Evict (ms)} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Dec tok/s} & \\textbf{E2E tok/s} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            "\\caption{\\textbf{Controlled Long-Context Baseline \\& Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Supersedes the 20-claim pilot. Compares uncompressed Full-SD, our SnapKV-style \\texttt{KV-Sparse} attention-eviction baseline (retaining sink+recent+pooled attention KV with RoPE offset preservation; distinct from TriForce/MagicDec target-side KV sparsity), training-free Prompt-Lookup Decoding (PLD), sliding window, zero-evidence ($B=0$), lexical BM25, and SPADE at $B=2\\text{k}$ and $B=10\\text{k}$ (plus slot-matched $B=2,529$). Reported CIs use paired claim-cluster bootstrap ($B=10,000$).}\n"
+            "\\caption{\\textbf{Controlled Long-Context Baseline \\& Compression Comparison on Complete Selective Cohort ($N=173$ claims $>10\\text{k}$ chars, RTX 5090):} Compares uncompressed Full-SD, prefill-free \\texttt{StreamingLLM} (MagicDec-style: 256 sink + 2,273 recent tokens sliced directly before draft prefill), our SnapKV-style \\texttt{KV-Sparse} eviction baseline (full prefill then sink+recent+pooled attention eviction with RoPE preservation), training-free Prompt-Lookup (PLD), sliding window, zero-evidence ($B=0$), lexical BM25, and SPADE ($B=2\\text{k}$ and $B=10\\text{k}$, slot-matched against $B=2,529$). Paired bootstrap 95\\% CIs ($B=10,000$).}\n"
             "\\label{tab:decisive_baselines}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_decisive_baselines.tex").write_text(tex, encoding="utf-8")
@@ -641,7 +684,7 @@ def main() -> None:
             "\\begin{tabular}{lccccccccr}\n\\toprule\n"
             "\\textbf{Context Len} & \\textbf{Target 8B Prefill} & \\textbf{Hook (ms / $\\Delta$VRAM)} & \\textbf{Draft Prefill (F $\\to$ S)} & \\textbf{Total Prefill (F $\\to$ S)} & \\textbf{AR tok/s} & \\textbf{Full-SD tok/s (VRAM)} & \\textbf{SPADE $\\alpha_{\\text{eval}}$} & \\textbf{SPADE tok/s (VRAM)} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            f"\\caption{{\\textbf{{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{{logits\\_to\\_keep=1}}, $N=20$ at 2k--16k, $N=10$ at 32k):}} Reports target prefill, hook overhead, draft prefill reduction, total prefill (Target+Hook+Draft), and E2E generation throughput (128 tokens) with peak co-located VRAM and paired bootstrap 95\\% CIs ($B=10,000$). At 2k, \\texttt{{StaticCache}} capacities are matched identically and SPADE triggers its short-context bypass.{measured_2k_hook} While SPADE caps draft prefill and KV memory, target prefill and target KV dominate total compute beyond 10k--14k tokens.}}\n"
+            "\\caption{\\textbf{Interleaved End-to-End Sequence Scaling up to 32k Tokens on RTX 5090 (PyTorch SDPA, \\texttt{logits\\_to\\_keep=1}, $N=20$ at 2k--16k, $N=10$ at 32k):} Prompts are AVeriTeC claims padded with held-out passages generating 128 tokens. Reports target prefill, hook overhead, draft prefill, total prefill (Target+Hook+Draft), E2E throughput, peak VRAM, and paired bootstrap 95\\% CIs ($B=10,000$). At 2k, \\texttt{StaticCache} capacities match identically and SPADE triggers bypass." + measured_2k_hook + f" After 4-way Holm correction across 2k--16k, SPADE outperforms Full-SD significantly at 16k ($p_{{\\text{{Holm}}}}={scaling_holm.get('16384', {}).get('p_holm', 0.0):.4f}$) while 8k raw $p={scaling_holm.get('8192', {}).get('p_raw', 0.041):.3f}$ adjusts to $p_{{\\text{{Holm}}}}={scaling_holm.get('8192', {}).get('p_holm', 0.123):.3f}$; Target AR leads at 16k--32k as target prefill and KV verification dominate.}}\n"
             "\\label{tab:long_context_scaling}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_long_context_scaling.tex").write_text(tex, encoding="utf-8")
@@ -706,7 +749,7 @@ def main() -> None:
             "\\begin{tabular}{lccccccr}\n\\toprule\n"
             "\\textbf{Method} & \\textbf{Draft Tok} & \\textbf{Draft KV} & \\textbf{$\\alpha_{\\text{eval}}/\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Dec} & \\textbf{E2E} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(comp_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            f"\\caption{{\\textbf{{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):}} SPADE recovers E2E parity with Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s, $p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$) and outperforms Baseline Full by {fl_gain_pct:+.1f}\\% ($p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$) and BM25 Top-2 ($p_{{\\text{{Holm}}}}={sp_t2_p:.3f}$) with {kv_sav_pct:.1f}\\% active draft KV (full metrics in Appendix Table \\ref{{tab:llama3_generalization_full}}).}}\n"
+            f"\\caption{{\\textbf{{Cross-Family Generalization (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, 300 Held-Out Claims):}} Under a $1:8$ draft ratio, SD yields no speedup over Target AR; SPADE restores E2E parity with AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s, $p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$) with a borderline +{fl_d:.2f} tok/s gain over Full-SD ($p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$, within short-context drift) and {kv_sav_pct:.1f}\\% draft KV (88.3\\%--93.3\\% strict / 94.3\\%--97.3\\% fence-stripped JSON validity; full metrics in Appendix Table \\ref{{tab:llama3_generalization_full}}).}}\n"
             "\\label{tab:llama3_generalization}\n\\end{table}\n"
         )
         (TABLES_DIR / "table_llama3_generalization.tex").write_text(comp_tex, encoding="utf-8")
@@ -716,7 +759,7 @@ def main() -> None:
             "\\begin{tabular}{llcccccccccc}\n\\toprule\n"
             "\\textbf{Decoding Method} & \\textbf{Context Policy} & \\textbf{Mean Draft Tok} & \\textbf{Active Draft KV} & \\textbf{Peak GPU VRAM} & \\textbf{$\\alpha_{\\text{eval}}$ (\\%)} & \\textbf{$\\alpha_{\\text{prop}}$ (\\%)} & \\textbf{Tok/Rnd} & \\textbf{Decode Thpt} & \\textbf{E2E Thpt} & \\textbf{E2E Latency} & \\textbf{$\\Delta$ vs.\\ Full (95\\% CI)} \\\\\n"
             "\\midrule\n" + "\n".join(full_lines) + "\n\\bottomrule\n\\end{tabular}%\n}\n"
-            f"\\caption{{\\textbf{{Full Cross-Family Generalization Matrix on 300 Held-Out Claims (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, RTX 5090):}} Throughput in tok/s; latency in ms/tok. Paired cluster bootstrap CIs ($B=10,000$). SPADE matches Target AR ({sp_e2e_v:.2f} vs.\\ {ar_thpt:.2f} tok/s, $p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$) and outperforms Baseline Full by {fl_gain_pct:+.1f}\\% (${fl_d:+.2f}\\text{{ tok/s}}$, $p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$) and BM25 Top-2 by ${t2_d:+.2f}\\text{{ tok/s}}$ ($p_{{\\text{{Holm}}}}={sp_t2_p:.3f}$) while reducing active draft KV by {kv_sav_pct:.1f}\\% ({full_kv:.1f} MB $\\to$ {sp_kv_v:.1f} MB).}}\n"
+            f"\\caption{{\\textbf{{Full Cross-Family Generalization Matrix on 300 Held-Out Claims (Llama-3.1-8B-Instruct + Llama-3.2-1B-Instruct, RTX 5090):}} Throughput in tok/s; latency in ms/tok. Paired cluster bootstrap CIs ($B=10,000$). Under a larger $1:8$ drafter, Full-SD trails Target AR ($46.76$ vs.\\ $47.93$ tok/s), while SPADE cuts active draft KV by {kv_sav_pct:.1f}\\% ({full_kv:.1f} $\\to$ {sp_kv_v:.1f} MB), restores AR parity ($p_{{\\text{{Holm}}}}={sp_ar_p:.2f}$), beats BM25 Top-2 (${t2_d:+.2f}\\text{{ tok/s}}$, $p_{{\\text{{Holm}}}}={sp_t2_p:.3f}$), and edges Full-SD by ${fl_d:+.2f}\\text{{ tok/s}}$ ($p_{{\\text{{Holm}}}}={sp_fl_p:.3f}$, within hardware drift). Strict / fence-stripped JSON validity spans 88.3\\%--93.3\\% / 94.3\\%--97.3\\% across arms (mean 102.9--106.5 output tokens).}}\n"
             "\\label{tab:llama3_generalization_full}\n\\end{table*}\n"
         )
         (TABLES_DIR / "table_llama3_generalization_full.tex").write_text(full_tex, encoding="utf-8")

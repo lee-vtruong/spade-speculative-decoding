@@ -175,7 +175,8 @@ class QwenPair:
                  draft_prompt: str | None = None,
                  distribution_mode: str = "fp64_orig",
                  target_attn_selector_cfg: dict[str, Any] | None = None,
-                 kv_sparse_cfg: dict[str, Any] | None = None) -> Generation:
+                 kv_sparse_cfg: dict[str, Any] | None = None,
+                 streaming_llm_cfg: dict[str, Any] | None = None) -> Generation:
         """Run B0/B0-S/B1/B2/M4/PLD with recompute or kv_cache strategy (supports asymmetric draft_prompt)."""
         if mode not in {"B0", "B0-S", "B1", "B2", "M4", "HF", "HF-Assisted", "PLD"}:
             raise ValueError(f"Unsupported mode {mode}")
@@ -359,9 +360,10 @@ class QwenPair:
                     prompt_offsets=prompt_offsets,
                     target_attn_selector_cfg=target_attn_selector_cfg,
                     kv_sparse_cfg=kv_sparse_cfg,
+                    streaming_llm_cfg=streaming_llm_cfg,
                 )
             except Exception as exc:
-                if getattr(self, "draft_runner", None) is not None or target_attn_selector_cfg is not None or mode == "PLD":
+                if getattr(self, "draft_runner", None) is not None or target_attn_selector_cfg is not None or streaming_llm_cfg is not None or mode == "PLD":
                     raise
                 # If KV cache is unsupported by mock models or specific configurations, fallback to recompute
                 if isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower():
@@ -591,7 +593,8 @@ class QwenPair:
                            serialized_prompt: str | None = None,
                            prompt_offsets: list[tuple[int, int]] | None = None,
                            target_attn_selector_cfg: dict[str, Any] | None = None,
-                           kv_sparse_cfg: dict[str, Any] | None = None) -> Generation:
+                           kv_sparse_cfg: dict[str, Any] | None = None,
+                           streaming_llm_cfg: dict[str, Any] | None = None) -> Generation:
         """KV-cache accelerated generation with rollback on rejection (supports asymmetric draft_prompt_ids)."""
         draft_base_ids = prompt_ids if draft_prompt_ids is None else draft_prompt_ids
         draft_runner = getattr(self, "draft_runner", None) if (self.draft is not None and mode not in {"B0", "B0-S", "PLD"}) else None
@@ -722,9 +725,20 @@ class QwenPair:
                 timings["context_selection_s"] = time.perf_counter() - sel_t0
                 timings["draft_prompt_tokens"] = float(len(draft_base_ids))
 
-        # Draft prefill (on draft_base_ids — may be shorter/selective or KV-sparse compacted)
+        # Draft prefill (on draft_base_ids — may be shorter/selective, StreamingLLM-truncated, or KV-sparse compacted)
         peak_draft_kv_bytes = 0
         if self.draft is not None and mode not in {"B0", "B0-S", "PLD"}:
+            if streaming_llm_cfg is not None:
+                sel_t0 = time.perf_counter()
+                kv_budget = int(streaming_llm_cfg.get("kv_budget", 2529))
+                sink_tokens = min(int(streaming_llm_cfg.get("sink_tokens", 256)), max(1, kv_budget // 2))
+                if len(draft_base_ids) > kv_budget:
+                    draft_base_ids = list(draft_base_ids[:sink_tokens]) + list(draft_base_ids[-(kv_budget - sink_tokens):])
+                if draft_runner is not None and len(draft_base_ids) + max_new_tokens >= draft_runner.max_cache_len:
+                    max_allowed = max(64, draft_runner.max_cache_len - max_new_tokens - 8)
+                    draft_base_ids = draft_base_ids[:max_allowed]
+                timings["context_selection_s"] = time.perf_counter() - sel_t0
+                timings["draft_prompt_tokens"] = float(len(draft_base_ids))
             draft_device = self._input_device(self.draft)
             self._sync(draft_device)
             d0 = time.perf_counter()
